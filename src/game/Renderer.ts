@@ -1,4 +1,4 @@
-import { CROPS, cropStage, secondsRemaining, type CropId } from '../data/crops'
+import { getCrop, cropStage, secondsRemaining } from '../data/crops'
 import type { AutomationKind } from './types'
 import type { WeatherKind } from '../systems/Weather'
 import type { PetSpot } from '../systems/Pets'
@@ -6,8 +6,6 @@ import type { UpgradeNode } from '../data/upgrades'
 import type { Farm } from '../systems/Farm'
 import type { TileState } from './types'
 
-const LOCKED_GRASS = '#8aab78'
-const LOCKED_GRASS_DARK = '#6a8a5a'
 const FENCE_WOOD = '#b8956a'
 const FENCE_DARK = '#8a6848'
 
@@ -26,6 +24,15 @@ const AUTO_ICON: Record<AutomationKind, string> = {
   sell: '🪙',
 }
 
+import type { TractorDef } from '../data/tractors'
+
+export interface FieldTheme {
+  grass: string
+  grassLight: string
+  soil: string
+  sky: string
+}
+
 export interface DecoDraw {
   id: string
   x: number
@@ -36,11 +43,14 @@ export interface DecoDraw {
 export interface RenderFrame {
   farm: Farm
   maxPlotSize: number
+  gridGap: number
   tileSize: number
+  fieldTheme?: FieldTheme
   decoSpots: DecoDraw[]
   tractorPulse: number
   tractorRadius: number
   hasTractor: boolean
+  tractorDef?: TractorDef
   growthSpeedMult: number
   dragHighlight: { gx: number; gy: number } | null
   hoverHighlight: { gx: number; gy: number } | null
@@ -87,11 +97,12 @@ export function pointHitsScenery(
   sx: number,
   sy: number,
   farm: Farm,
-  tileSize: number,
+  _tileSize: number,
   vw: number,
   vh: number,
 ): boolean {
-  const { ox, oy, tw, th } = farmScreenOffset(farm, farm.w, tileSize, vw, vh)
+  const layout = computeFarmLayout(farm, vw, vh)
+  const { ox, oy, tw, th } = layout
   return sceneryHitBoxes(ox, oy, tw, th).some((r) => pointInRegion(sx, sy, r))
 }
 
@@ -112,14 +123,57 @@ export function tileJitter(gx: number, gy: number): TileJitter {
   }
 }
 
+export interface FarmLayout {
+  tileSize: number
+  gap: number
+  ox: number
+  oy: number
+  tw: number
+  th: number
+  plot: number
+}
+
+const LAYOUT_PAD = { top: 28, bottom: 112, left: 92, right: 28 }
+
+/** Size and position the farm grid so every field fits on screen. */
+export function computeFarmLayout(farm: Farm, vw: number, vh: number): FarmLayout {
+  const plot = farm.w
+  const availW = Math.max(80, vw - LAYOUT_PAD.left - LAYOUT_PAD.right)
+  const availH = Math.max(80, vh - LAYOUT_PAD.top - LAYOUT_PAD.bottom)
+
+  let gap = plot >= 7 ? 5 : plot >= 5 ? 6 : 8
+  let tileSize = Math.floor(
+    Math.min((availW - (plot - 1) * gap) / plot, (availH - (plot - 1) * gap) / plot),
+  )
+
+  if (tileSize < 24 && gap > 4) {
+    gap = 4
+    tileSize = Math.floor(
+      Math.min((availW - (plot - 1) * gap) / plot, (availH - (plot - 1) * gap) / plot),
+    )
+  }
+
+  tileSize = Math.max(24, Math.min(64, tileSize))
+  const tw = plot * tileSize + (plot - 1) * gap
+  const th = plot * tileSize + (plot - 1) * gap
+  const ox = LAYOUT_PAD.left + (availW - tw) / 2
+  const oy = LAYOUT_PAD.top + (availH - th) / 2
+
+  return { tileSize, gap, ox, oy, tw, th, plot }
+}
+
 export function farmScreenOffset(
   _farm: Farm,
   maxPlot: number,
   tileSize: number,
   vw: number,
   vh: number,
+  gap = 8,
 ): { ox: number; oy: number; tw: number; th: number } {
-  const gap = 10
+  const layout = computeFarmLayout(_farm, vw, vh)
+  if (maxPlot === _farm.w && Math.abs(tileSize - layout.tileSize) < 2) {
+    return { ox: layout.ox, oy: layout.oy, tw: layout.tw, th: layout.th }
+  }
   const tw = maxPlot * tileSize + (maxPlot - 1) * gap
   const th = maxPlot * tileSize + (maxPlot - 1) * gap
   const ox = (vw - tw) / 2
@@ -133,11 +187,12 @@ export function tilePixelPos(
   gx: number,
   gy: number,
   tileSize: number,
+  gap = 8,
 ): { px: number; py: number; cx: number; cy: number } {
-  const gap = 10
   const j = tileJitter(gx, gy)
-  const px = ox + gx * (tileSize + gap) + j.ox
-  const py = oy + gy * (tileSize + gap) + j.oy
+  const jitterScale = tileSize < 36 ? 0.35 : tileSize < 48 ? 0.6 : 1
+  const px = ox + gx * (tileSize + gap) + j.ox * jitterScale
+  const py = oy + gy * (tileSize + gap) + j.oy * jitterScale
   return { px, py, cx: px + tileSize / 2, cy: py + tileSize / 2 }
 }
 
@@ -163,12 +218,21 @@ function hash01(gx: number, gy: number, salt: number): number {
   return (((gx * 374761 + gy * 668265 + salt * 982451) >>> 0) % 1000) / 1000
 }
 
-/** Restrained sky — warm top, cool horizon, no gradient soup */
-export function drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number, time: number): void {
+/** Restrained sky — warm top, cool horizon, tinted per field */
+export function drawBackground(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  time: number,
+  theme?: FieldTheme,
+): void {
+  const skyTop = theme?.sky ?? '#f5dcc4'
+  const skyMid = theme?.grassLight ?? '#dceef8'
+  const skyBot = theme?.grass ?? '#c8e4b4'
   const sky = ctx.createLinearGradient(0, 0, 0, h)
-  sky.addColorStop(0, '#f5dcc4')
-  sky.addColorStop(0.55, '#dceef8')
-  sky.addColorStop(1, '#c8e4b4')
+  sky.addColorStop(0, skyTop)
+  sky.addColorStop(0.55, skyMid)
+  sky.addColorStop(1, skyBot)
   ctx.fillStyle = sky
   ctx.fillRect(0, 0, w, h)
 
@@ -311,45 +375,6 @@ function drawScenery(
   }
 }
 
-function drawLockedPlot(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  s: number,
-  gx: number,
-  gy: number,
-  time: number,
-): void {
-  const j = tileJitter(gx, gy)
-  const r = 16 + hash01(gx, gy, 99) * 4
-  const depth = 6
-
-  ctx.save()
-  ctx.translate(x + s / 2, y + s / 2)
-  ctx.rotate(j.rot)
-  ctx.scale(j.scale * 0.96, j.scale * 0.96)
-  ctx.translate(-s / 2, -s / 2)
-
-  roundRect(ctx, 0, depth, s, s, r)
-  ctx.fillStyle = LOCKED_GRASS_DARK
-  ctx.fill()
-  roundRect(ctx, 0, 0, s, s, r)
-  ctx.fillStyle = LOCKED_GRASS
-  ctx.fill()
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)'
-  ctx.lineWidth = 2
-  ctx.stroke()
-
-  ctx.fillStyle = 'rgba(60, 80, 50, 0.35)'
-  ctx.font = '700 18px Nunito, system-ui, sans-serif'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  const bob = Math.sin(time * 1.4 + gx + gy) * 1.5
-  ctx.fillText('🔒', s / 2, s / 2 + bob)
-
-  ctx.restore()
-}
-
 function drawPlotBorderFence(
   ctx: CanvasRenderingContext2D,
   ox: number,
@@ -413,7 +438,11 @@ function drawRaisedPlot(
   gx: number,
   gy: number,
   time: number,
+  theme?: FieldTheme,
 ): void {
+  const grassMid = theme?.grass ?? GRASS_MID
+  const grassLight = theme?.grassLight ?? GRASS_LIGHT
+  const soilTop = theme?.soil ?? SOIL_TOP
   const j = tileJitter(gx, gy)
   const squash = t.bounce > 0 ? 1 - Math.sin((1 - t.bounce) * Math.PI) * 0.1 : 1
   const lift = t.bounce > 0 ? -Math.sin((1 - t.bounce) * Math.PI) * 7 : 0
@@ -438,9 +467,9 @@ function drawRaisedPlot(
     ctx.shadowOffsetY = 0
 
     roundRect(ctx, 0, 0, s, s, r)
-    ctx.fillStyle = GRASS_MID
+    ctx.fillStyle = grassMid
     ctx.fill()
-    ctx.fillStyle = GRASS_LIGHT
+    ctx.fillStyle = grassLight
     roundRect(ctx, 0, 0, s, s * 0.55, r)
     ctx.fill()
     ctx.strokeStyle = 'rgba(255,255,255,0.28)'
@@ -468,7 +497,7 @@ function drawRaisedPlot(
     roundRect(ctx, 0, 0, s, s, r)
     ctx.fillStyle = SOIL_MID
     ctx.fill()
-    ctx.fillStyle = SOIL_TOP
+    ctx.fillStyle = soilTop
     roundRect(ctx, 0, 0, s, s * 0.42, r)
     ctx.fill()
 
@@ -509,12 +538,13 @@ function drawCropSprite(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
-  cropId: CropId,
+  cropId: string,
   growth: number,
   time: number,
   pop: number,
+  mutation?: TileState['mutation'],
 ): void {
-  const def = CROPS[cropId]
+  const def = getCrop(cropId)
   const stage = cropStage(growth)
   const stageScale = 0.72 + stage * 0.1 + growth * 0.06
   const popY = pop > 0 ? -Math.sin((1 - pop) * Math.PI) * 26 * pop : 0
@@ -618,9 +648,18 @@ function drawCropSprite(
       ctx.stroke()
     }
 
-    if (def.rarity === 'rainbow' || def.rarity === 'gold') {
-      ctx.shadowColor = def.rarity === 'rainbow' ? '#ff6b81' : '#ffd54f'
+    if (def.rarity === 'rainbow' || def.rarity === 'gold' || mutation === 'rainbow') {
+      ctx.shadowColor = mutation === 'crystal' ? '#6c8ae4' : '#ffd54f'
       ctx.shadowBlur = 14 + Math.sin(time * 4) * 5
+    }
+    if (mutation === 'golden') {
+      ctx.fillStyle = 'rgba(255, 215, 0, 0.35)'
+      ctx.beginPath()
+      ctx.arc(0, -stemH - 14, 22, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    if (mutation === 'giant') {
+      ctx.scale(1.15, 1.15)
     }
   }
 
@@ -636,7 +675,7 @@ function drawGrowthTimer(
   growthSpeedMult: number,
 ): void {
   if (t.kind !== 'crop' || !t.cropId || t.growth >= 1) return
-  const def = CROPS[t.cropId]
+  const def = getCrop(t.cropId)
   const secs = secondsRemaining(t.growth, def.baseGrowSeconds, growthSpeedMult, t.watered)
   if (secs <= 0) return
 
@@ -669,10 +708,11 @@ function drawParkedTractor(
   hasTractor: boolean,
   pulse: number,
   time: number,
+  tractorDef?: TractorDef,
 ): void {
   ctx.save()
   ctx.translate(x, y)
-  const bob = Math.sin(time * 1.2) * 2
+  const bob = tractorDef?.hover ? Math.sin(time * 1.8) * 6 : Math.sin(time * 1.2) * 2
   ctx.translate(0, bob)
   const s = 1 + pulse * 0.08
 
@@ -685,8 +725,8 @@ function drawParkedTractor(
   }
 
   ctx.scale(s, s)
-  const body = hasTractor ? '#e84b6a' : '#9aa0ab'
-  const cab = hasTractor ? '#4b6cb7' : '#7a8494'
+  const body = hasTractor ? (tractorDef?.bodyColor ?? '#e84b6a') : '#9aa0ab'
+  const cab = hasTractor ? (tractorDef?.cabColor ?? '#4b6cb7') : '#7a8494'
 
   ctx.fillStyle = body
   roundRect(ctx, -44, -6, 78, 32, 12)
@@ -722,7 +762,7 @@ function drawParkedTractor(
     ctx.fillStyle = '#f4c430'
     ctx.font = '700 12px Nunito, system-ui, sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText('vroom', 0, -34)
+    ctx.fillText(tractorDef?.hover ? 'zoom' : 'vroom', 0, -34)
   }
   ctx.restore()
 }
@@ -823,25 +863,19 @@ export function renderFarm(
   vw: number,
   vh: number,
 ): { ox: number; oy: number; tileSize: number } {
-  const { farm, tileSize } = frame
-  const { ox, oy, tw, th } = farmScreenOffset(farm, frame.maxPlotSize, tileSize, vw, vh)
+  const { farm, tileSize, gridGap } = frame
+  const plot = farm.w
+  const { ox, oy, tw, th } = farmScreenOffset(farm, plot, tileSize, vw, vh, gridGap)
 
   drawScenery(ctx, ox, oy, tw, th, time)
 
-  for (let gy = 0; gy < frame.maxPlotSize; gy++) {
-    for (let gx = 0; gx < frame.maxPlotSize; gx++) {
-      const { px, py, cx, cy } = tilePixelPos(ox, oy, gx, gy, tileSize)
-      const locked = gx >= farm.w || gy >= farm.h
-
-      if (locked) {
-        drawLockedPlot(ctx, px, py, tileSize, gx, gy, time)
-        continue
-      }
-
-      drawRaisedPlot(ctx, px, py, tileSize, farm.tiles[gy][gx], gx, gy, time)
+  for (let gy = 0; gy < plot; gy++) {
+    for (let gx = 0; gx < plot; gx++) {
+      const { px, py, cx, cy } = tilePixelPos(ox, oy, gx, gy, tileSize, gridGap)
+      drawRaisedPlot(ctx, px, py, tileSize, farm.tiles[gy][gx], gx, gy, time, frame.fieldTheme)
       const t = farm.tiles[gy][gx]
       if (t.kind === 'crop' && t.cropId) {
-        drawCropSprite(ctx, cx, cy - 4, t.cropId, t.growth, time, t.pop)
+        drawCropSprite(ctx, cx, cy - 4, t.cropId, t.growth, time, t.pop, t.mutation)
         drawGrowthTimer(ctx, cx, cy, tileSize, t, frame.growthSpeedMult)
       }
       const isClick =
@@ -897,21 +931,27 @@ export function renderFarm(
 
   for (const flash of frame.autoFlashes) {
     if (flash.gx >= farm.w || flash.gy >= farm.h) continue
-    const { cx, cy } = tilePixelPos(ox, oy, flash.gx, flash.gy, tileSize)
+    const { cx, cy } = tilePixelPos(ox, oy, flash.gx, flash.gy, tileSize, gridGap)
     drawAutoFlashIcon(ctx, cx, cy, flash.kind, flash.t / 0.6)
   }
 
   if (frame.expansionAnim > 0) {
     drawPlotBorderFence(ctx, ox, oy, farm.w, farm.h, tileSize, frame.expansionAnim)
-  } else if (farm.w < frame.maxPlotSize) {
-    drawPlotBorderFence(ctx, ox, oy, farm.w, farm.h, tileSize, 0)
   }
 
   for (const d of frame.decoSpots) drawDeco(ctx, d, time)
 
   drawPets(ctx, frame.petSpots, time)
 
-  drawParkedTractor(ctx, ox - 98, oy + farm.h * (tileSize + 10) * 0.45, frame.hasTractor, frame.tractorPulse, time)
+  drawParkedTractor(
+    ctx,
+    ox - 98,
+    oy + farm.h * (tileSize + gridGap) * 0.42,
+    frame.hasTractor,
+    frame.tractorPulse,
+    time,
+    frame.tractorDef,
+  )
 
   drawWeatherOverlay(ctx, vw, vh, frame.weather, time)
 
@@ -923,36 +963,36 @@ export function drawSceneLayers(
   w: number,
   h: number,
   time: number,
+  theme?: FieldTheme,
 ): void {
-  drawBackground(ctx, w, h, time)
+  drawBackground(ctx, w, h, time, theme)
   drawDriftingClouds(ctx, w, h, time)
 }
 
 export function screenToGrid(
   sx: number,
   sy: number,
-  farm: Farm,
-  maxPlot: number,
-  tileSize: number,
-  vw: number,
-  vh: number,
+  _farm: Farm,
+  layout: FarmLayout,
+  _vw: number,
+  _vh: number,
 ): { gx: number; gy: number; locked: boolean } | null {
-  const { ox, oy, tw, th } = farmScreenOffset(farm, maxPlot, tileSize, vw, vh)
+  const { ox, oy, tw, th, tileSize, gap, plot } = layout
   if (sx < ox - 12 || sy < oy - 12 || sx > ox + tw + 12 || sy > oy + th + 12) {
     return null
   }
 
-  for (let gy = 0; gy < maxPlot; gy++) {
-    for (let gx = 0; gx < maxPlot; gx++) {
-      const { px, py } = tilePixelPos(ox, oy, gx, gy, tileSize)
-      const pad = 6
+  for (let gy = 0; gy < plot; gy++) {
+    for (let gx = 0; gx < plot; gx++) {
+      const { px, py } = tilePixelPos(ox, oy, gx, gy, tileSize, gap)
+      const pad = Math.max(4, tileSize * 0.12)
       if (
         sx >= px - pad &&
         sx <= px + tileSize + pad &&
         sy >= py - pad &&
         sy <= py + tileSize + pad
       ) {
-        return { gx, gy, locked: gx >= farm.w || gy >= farm.h }
+        return { gx, gy, locked: false }
       }
     }
   }

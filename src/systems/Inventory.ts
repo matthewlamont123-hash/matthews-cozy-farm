@@ -1,5 +1,5 @@
-import type { CropId } from '../data/crops'
-import { CROPS, type CropRarity } from '../data/crops'
+import type { GameCropId } from '../data/crops'
+import { getCrop, type CropRarity } from '../data/crops'
 
 const RARITY_ORDER: Record<CropRarity, number> = {
   common: 0,
@@ -10,9 +10,9 @@ const RARITY_ORDER: Record<CropRarity, number> = {
 }
 
 export class Inventory {
-  seeds: Map<CropId, number> = new Map()
+  seeds: Map<GameCropId, number> = new Map()
   /** Harvested crops waiting to be sold */
-  harvest: Map<CropId, number> = new Map()
+  harvest: Map<GameCropId, number> = new Map()
   capacity = 16
 
   get usedSlots(): number {
@@ -30,11 +30,11 @@ export class Inventory {
     return this.usedSlots / this.capacity
   }
 
-  addSeeds(cropId: CropId, amount: number): void {
+  addSeeds(cropId: GameCropId, amount: number): void {
     this.seeds.set(cropId, (this.seeds.get(cropId) ?? 0) + amount)
   }
 
-  tryConsumeSeed(cropId: CropId): boolean {
+  tryConsumeSeed(cropId: GameCropId): boolean {
     const n = this.seeds.get(cropId) ?? 0
     if (n <= 0) return false
     this.seeds.set(cropId, n - 1)
@@ -42,7 +42,7 @@ export class Inventory {
   }
 
   /** Pick any seed the player has (for auto-plant fallback). */
-  pickAnySeed(): CropId | null {
+  pickAnySeed(): GameCropId | null {
     for (const [id, qty] of this.seeds.entries()) {
       if (qty > 0) return id
     }
@@ -50,7 +50,7 @@ export class Inventory {
   }
 
   /** Returns how many units actually stored (may be partial if backpack full). */
-  addHarvest(cropId: CropId, amount: number): number {
+  addHarvest(cropId: GameCropId, amount: number): number {
     const free = this.freeSlots
     const take = Math.min(free, amount)
     if (take <= 0) return 0
@@ -59,13 +59,13 @@ export class Inventory {
   }
 
   /** Sorted harvest entries by rarity then name. */
-  sortedHarvest(): [CropId, number][] {
+  sortedHarvest(): [GameCropId, number][] {
     const entries = [...this.harvest.entries()].filter(([, q]) => q > 0)
     entries.sort((a, b) => {
-      const ra = RARITY_ORDER[CROPS[a[0]].rarity]
-      const rb = RARITY_ORDER[CROPS[b[0]].rarity]
+      const ra = RARITY_ORDER[getCrop(a[0]).rarity]
+      const rb = RARITY_ORDER[getCrop(b[0]).rarity]
       if (ra !== rb) return rb - ra
-      return CROPS[a[0]].name.localeCompare(CROPS[b[0]].name)
+      return getCrop(a[0]).name.localeCompare(getCrop(b[0]).name)
     })
     return entries
   }
@@ -77,7 +77,7 @@ export class Inventory {
     for (const [id, qty] of sorted) this.harvest.set(id, qty)
   }
 
-  totalHarvestValue(priceFor: (id: CropId, qty: number) => number): number {
+  totalHarvestValue(priceFor: (id: GameCropId, qty: number) => number): number {
     let sum = 0
     for (const [id, qty] of this.harvest.entries()) {
       if (qty > 0) sum += priceFor(id, qty)
@@ -85,7 +85,7 @@ export class Inventory {
     return sum
   }
 
-  sellAll(coinsFor: (id: CropId, qty: number) => number): number {
+  sellAll(coinsFor: (id: GameCropId, qty: number) => number): number {
     let earned = 0
     for (const [id, qty] of this.harvest.entries()) {
       if (qty <= 0) continue
@@ -95,7 +95,7 @@ export class Inventory {
     return earned
   }
 
-  sellCrop(cropId: CropId, qty: number, unitPrice: number): number {
+  sellCrop(cropId: GameCropId, qty: number, unitPrice: number): number {
     const have = this.harvest.get(cropId) ?? 0
     const take = Math.min(have, qty)
     if (take <= 0) return 0
@@ -113,20 +113,20 @@ export class Inventory {
   }
 
   static fromJSON(data: {
-    seeds?: Record<string, number>
-    harvest?: Record<string, number>
+    seeds?: Partial<Record<string, number>>
+    harvest?: Partial<Record<string, number>>
     capacity?: number
   }): Inventory {
     const inv = new Inventory()
     inv.capacity = data.capacity ?? 16
     if (data.seeds) {
       for (const [k, v] of Object.entries(data.seeds)) {
-        inv.seeds.set(k as CropId, v)
+        if (v != null && v > 0) inv.seeds.set(k, v)
       }
     }
     if (data.harvest) {
       for (const [k, v] of Object.entries(data.harvest)) {
-        inv.harvest.set(k as CropId, v)
+        if (v != null && v > 0) inv.harvest.set(k, v)
       }
     }
     return inv

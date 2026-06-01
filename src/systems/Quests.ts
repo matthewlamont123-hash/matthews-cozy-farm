@@ -1,4 +1,4 @@
-import type { CropId } from '../data/crops'
+import type { CropId, GameCropId } from '../data/crops'
 
 export interface QuestReward {
   coins?: number
@@ -108,7 +108,7 @@ export class QuestSystem {
   }
 
   /** Deliver crop from satchel harvest stash. */
-  tryDeliver(cropId: CropId, harvest: Map<CropId, number>): number {
+  tryDeliver(cropId: CropId, harvest: Map<GameCropId, number>): number {
     const q = this.activeQuest()
     if (!q || q.type !== 'deliver' || q.crop !== cropId) return 0
     const have = harvest.get(cropId) ?? 0

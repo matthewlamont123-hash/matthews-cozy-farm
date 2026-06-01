@@ -1,6 +1,6 @@
-import { CROPS, type CropId } from '../data/crops'
-import type { ActiveSeason } from './Seasons'
-import { seasonGrowthMult as cropSeasonGrowth } from './Seasons'
+import { getCrop, type GameCropId } from '../data/crops'
+import { rollMutationOnMature, applyMutationToTile } from './Mutations'
+import { seasonGrowthMult as cropSeasonGrowth, type ActiveSeason } from './Seasons'
 import type { SerialTile, TileState } from '../game/types'
 
 function emptyTile(): TileState {
@@ -37,6 +37,17 @@ export class Farm {
     this.tiles = next
   }
 
+  reset(w: number, h: number): void {
+    this.w = w
+    this.h = h
+    this.tiles = []
+    for (let y = 0; y < h; y++) {
+      const row: TileState[] = []
+      for (let x = 0; x < w; x++) row.push(emptyTile())
+      this.tiles.push(row)
+    }
+  }
+
   inBounds(x: number, y: number): boolean {
     return x >= 0 && y >= 0 && x < this.w && y < this.h
   }
@@ -61,10 +72,10 @@ export class Farm {
     return true
   }
 
-  plant(x: number, y: number, cropId: CropId): boolean {
+  plant(x: number, y: number, cropId: GameCropId): boolean {
     const t = this.get(x, y)
     if (!t || t.kind !== 'soil') return false
-    const def = CROPS[cropId]
+    const def = getCrop(cropId)
     t.kind = 'crop'
     t.cropId = cropId
     t.growth = 0
@@ -89,8 +100,8 @@ export class Farm {
     x: number,
     y: number,
     radius: number,
-  ): { gx: number; gy: number; cropId: CropId }[] {
-    const found: { gx: number; gy: number; cropId: CropId }[] = []
+  ): { gx: number; gy: number; cropId: GameCropId }[] {
+    const found: { gx: number; gy: number; cropId: GameCropId }[] = []
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
         const gx = x + dx
@@ -105,8 +116,8 @@ export class Farm {
   }
 
   /** All mature crops on the farm. */
-  collectAllMature(): { gx: number; gy: number; cropId: CropId }[] {
-    const found: { gx: number; gy: number; cropId: CropId }[] = []
+  collectAllMature(): { gx: number; gy: number; cropId: GameCropId }[] {
+    const found: { gx: number; gy: number; cropId: GameCropId }[] = []
     for (let gy = 0; gy < this.h; gy++) {
       for (let gx = 0; gx < this.w; gx++) {
         const t = this.tiles[gy][gx]
@@ -148,12 +159,12 @@ export class Farm {
   }
 
   /** Remove a mature crop from one tile; returns its id or null. Handles multi-harvest. */
-  pickCrop(gx: number, gy: number): CropId | null {
+  pickCrop(gx: number, gy: number): GameCropId | null {
     if (!this.inBounds(gx, gy)) return null
     const t = this.tiles[gy][gx]
     if (!this.isMature(t) || !t.cropId) return null
     const id = t.cropId
-    const def = CROPS[id]
+    const def = getCrop(id)
     const remaining = (t.harvestsLeft ?? 1) - 1
 
     if (remaining > 0 && (def.maxHarvests ?? 1) > 1) {
@@ -178,7 +189,13 @@ export class Farm {
    * @param growthSpeedMult from watering-can upgrades (>1 = faster)
    * @param dtSeconds delta time
    */
-  tickGrowth(dtSeconds: number, growthSpeedMult: number, season: ActiveSeason, weatherGrowth: number): void {
+  tickGrowth(
+    dtSeconds: number,
+    growthSpeedMult: number,
+    season: ActiveSeason,
+    weatherGrowth: number,
+    mutationMult = 1,
+  ): void {
     for (let y = 0; y < this.h; y++) {
       for (let x = 0; x < this.w; x++) {
         const t = this.tiles[y][x]
@@ -190,8 +207,8 @@ export class Farm {
           if (t.pop > 0) t.pop = Math.max(0, t.pop - dtSeconds * 2.8)
           continue
         }
-        const def = CROPS[t.cropId]
-        const waterBoost = t.watered ? 1.35 : 1
+        const def = getCrop(t.cropId)
+        const waterBoost = t.watered ? 1.55 : 1
         const isRegrow = t.growth === 0 && (t.harvestsLeft ?? 1) < (def.maxHarvests ?? 1)
         const growBase = isRegrow
           ? def.baseGrowSeconds * (def.regrowRatio ?? 0.5)
@@ -200,7 +217,12 @@ export class Farm {
         const inc =
           (dtSeconds * growthSpeedMult * weatherGrowth * seasonMult * waterBoost) /
           Math.max(0.5, growBase)
+        const prev = t.growth
         t.growth = Math.min(1, t.growth + inc)
+        if (prev < 1 && t.growth >= 1 && !t.mutation) {
+          const mut = rollMutationOnMature(mutationMult)
+          if (mut) applyMutationToTile(t, mut)
+        }
         if (t.bounce > 0) t.bounce = Math.max(0, t.bounce - dtSeconds * 2.2)
         if (t.pop > 0) t.pop = Math.max(0, t.pop - dtSeconds * 2.8)
       }
@@ -218,6 +240,7 @@ export class Farm {
           g: Math.round(t.growth * 1000) / 1000,
           w: t.watered || undefined,
           h: t.harvestsLeft,
+          m: t.mutation,
         }
       }),
     )
@@ -233,11 +256,12 @@ export class Farm {
         else if (s.k === 's') t.kind = 'soil'
         else {
           t.kind = 'crop'
-          t.cropId = s.c as CropId
+          t.cropId = s.c
           t.growth = s.g ?? 0
           t.watered = !!s.w
           if (s.h !== undefined) t.harvestsLeft = s.h
-          else if (t.cropId) t.harvestsLeft = CROPS[t.cropId].maxHarvests ?? 1
+          else if (t.cropId) t.harvestsLeft = getCrop(t.cropId).maxHarvests ?? 1
+          t.mutation = s.m
         }
         this.tiles[y][x] = t
       }

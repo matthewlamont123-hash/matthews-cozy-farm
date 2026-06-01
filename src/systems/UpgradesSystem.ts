@@ -35,6 +35,10 @@ export class UpgradesSystem {
     this.farm = farm
   }
 
+  setFarm(farm: Farm): void {
+    this.farm = farm
+  }
+
   hydrateFromOwned(): void {
     this.tractorRadius = 0
     this.growthSpeedMult = 1

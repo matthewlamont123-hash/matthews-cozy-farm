@@ -1,5 +1,7 @@
-import { CROPS, sellPriceWithBonus, type CropId } from '../data/crops'
-import { findRecipe } from '../data/hybrids'
+import { CROPS, getCrop, sellPriceWithBonus, type CropId, type GameCropId } from '../data/crops'
+import { findDiscoveryRecipe } from '../data/discoveries'
+import { FIELDS, type FieldId } from '../data/fields'
+import { TRACTORS, type TractorId } from '../data/tractors'
 import { BASE_PLOT_SIZE } from '../data/upgrades'
 import { getNode } from '../data/upgrades'
 import { Sfx } from './Audio'
@@ -7,11 +9,12 @@ import { ParticleSystem } from './Particles'
 import {
   type DecoDraw,
   type RenderFrame,
+  computeFarmLayout,
   drawSceneLayers,
-  farmScreenOffset,
   renderFarm,
   screenToGrid,
   tilePixelPos,
+  type FarmLayout,
 } from './Renderer'
 import type { ToolMode } from './types'
 import { AchievementSystem } from '../systems/Achievements'
@@ -40,12 +43,23 @@ import { activeSeason, seasonSellMult } from '../systems/Seasons'
 import type { ActiveSeason } from '../systems/Seasons'
 import { Shop } from '../systems/Shop'
 import { UpgradesSystem } from '../systems/UpgradesSystem'
-import { applyLoadedFarm, loadGame, saveGame } from '../systems/SaveSystem'
+import { applyLoadedFields, loadGame, saveGame } from '../systems/SaveSystem'
 import { WeatherSystem, weatherGrowthMult, weatherWaterMult } from '../systems/Weather'
+import { FieldManager } from '../systems/FieldManager'
+import { DiscoveryJournal } from '../systems/DiscoveryJournal'
+import { WorldEventSystem, EVENT_EMOJI, EVENT_LABEL, type EmpireEventKind } from '../systems/WorldEvents'
+import { mutationSellMult, MUTATION_EMOJI, type MutationKind } from '../systems/Mutations'
+import {
+  fertilizerMutationMult,
+  fertilizerSellMult,
+  irrigationGrowthMult,
+} from '../data/fields'
 
 const DEFAULT_UPGRADES = ['water_1', 'pack_1'] as const
+/** Base growth boost so crops feel snappy and cozy, not grindy. */
+const COZY_GROWTH_BOOST = 1.45
 
-export type PanelId = 'none' | 'shop' | 'upgrades' | 'inventory' | 'journal'
+export type PanelId = 'none' | 'shop' | 'upgrades' | 'inventory' | 'journal' | 'empire'
 
 export interface GameUICallbacks {
   onToast: (msg: string) => void
@@ -53,33 +67,49 @@ export interface GameUICallbacks {
   onBackpack: (used: number, cap: number) => void
   onPanelState: (panel: PanelId) => void
   onToolMode: (t: ToolMode) => void
-  onSelectedCrop: (c: CropId) => void
+  onSelectedCrop: (c: string) => void
   onShopRefresh: () => void
   onUpgradesRefresh: () => void
   onInventoryRefresh: () => void
   onJournalRefresh?: () => void
+  onEmpireRefresh?: () => void
   onAutomationStatus?: (line: string) => void
   onDailyReady?: (ready: boolean, streak: number) => void
   onCombo?: (count: number) => void
   onSeasonWeather?: (season: ActiveSeason, weather: string) => void
   onAchievement?: (name: string) => void
+  onDiscovery?: (emoji: string, name: string) => void
+  onWorldEvent?: (label: string) => void
+  onFieldChange?: (name: string) => void
 }
 
 export class GameLoop {
-  farm: Farm
+  fieldManager = new FieldManager()
+  get farm(): Farm {
+    return this.fieldManager.activeFarm()
+  }
+
   inventory: Inventory
-  coins = { value: 120 }
+  coins = { value: 180 }
   shop: Shop
   upgrades: UpgradesSystem
   automation = new AutomationSystem()
   weather = new WeatherSystem()
+  worldEvents = new WorldEventSystem()
   quests = new QuestSystem()
   achievements = new AchievementSystem()
-  discoveredHybrids = new Set<CropId>()
+  journal = new DiscoveryJournal()
+  discoveredCrops = new Set<string>()
+  /** @deprecated alias */
+  get discoveredHybrids(): Set<string> {
+    return this.discoveredCrops
+  }
+  ownedTractors = new Set<TractorId>(['rusty'])
   prestigeLevel = 0
   useRealSeason = true
   gameDay = 0
   particles = new ParticleSystem()
+  celebration: { emoji: string; name: string; t: number } | null = null
   tool: ToolMode = 'hoe'
   selectedCrop: CropId = 'turnip'
   panel: PanelId = 'none'
@@ -111,15 +141,14 @@ export class GameLoop {
     if (!c) throw new Error('2d context')
     this.ctx = c
     this.ui = ui
-    this.farm = new Farm(BASE_PLOT_SIZE, BASE_PLOT_SIZE)
     this.inventory = new Inventory()
     this.upgrades = new UpgradesSystem(this.inventory, this.farm)
-    this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredHybrids)
+    this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredCrops)
 
     const loaded = loadGame()
     if (loaded) {
       this.coins.value = loaded.coins
-      applyLoadedFarm(this.farm, loaded)
+      applyLoadedFields(this.fieldManager, loaded)
       this.inventory = Inventory.fromJSON({
         seeds: loaded.seeds,
         harvest: loaded.harvest,
@@ -128,19 +157,25 @@ export class GameLoop {
       this.upgrades = new UpgradesSystem(this.inventory, this.farm)
       loaded.upgrades.forEach((id) => this.upgrades.owned.add(id))
       this.upgrades.hydrateFromOwned()
+      this.fieldManager.starterExpansions = loaded.starterExpansions
+      this.fieldManager.applyStarterExpansion()
       this.automation.hydrate(loaded.automation)
       for (const [kind, lvl] of Object.entries(this.upgrades.automation)) {
         if (lvl > 0) this.automation.setLevel(kind as keyof typeof this.upgrades.automation, lvl)
       }
       this.prestigeLevel = loaded.prestigeLevel
-      this.discoveredHybrids = new Set(loaded.discoveredHybrids)
+      this.discoveredCrops = new Set(loaded.discoveredCrops)
+      this.ownedTractors = new Set(loaded.ownedTractors as TractorId[])
       this.useRealSeason = loaded.useRealSeason
       this.gameDay = loaded.gameDay
       this.weather.hydrate(loaded.weather)
+      this.worldEvents.hydrate(loaded.activeEvent as EmpireEventKind | null, loaded.eventTimer)
       this.achievements.hydrate(loaded.unlockedAchievements, loaded.stats)
+      this.journal.hydrate(loaded.journal as Parameters<DiscoveryJournal['hydrate']>[0])
       this.quests.hydrate(loaded.activeQuestId, loaded.questProgress, loaded.completedQuestIds)
-      this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredHybrids)
-      this.selectedCrop = loaded.selectedCrop
+      this.upgrades.setFarm(this.farm)
+      this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredCrops)
+      this.selectedCrop = loaded.selectedCrop as CropId
       this.tool = loaded.tool
       this.combo.count = loaded.comboCount
       this.combo.timer = loaded.comboTimer
@@ -169,15 +204,53 @@ export class GameLoop {
     return activeSeason(this.useRealSeason, this.gameDay)
   }
 
-  unitSellPrice(cropId: CropId): number {
-    const def = CROPS[cropId]
+  unitSellPrice(cropId: string, mutation?: MutationKind): number {
+    const def = getCrop(cropId)
+    const eq = this.fieldManager.activeEquipment()
+    const fieldDef = FIELDS[this.fieldManager.activeId]
     let price = sellPriceWithBonus(def.sellPrice, this.upgrades.cropValueMult)
-    price = Math.floor(price * seasonSellMult(def, this.currentSeason()) * prestigeCoinMult(this.prestigeLevel))
+    price = Math.floor(
+      price *
+        seasonSellMult(def, this.currentSeason()) *
+        prestigeCoinMult(this.prestigeLevel) *
+        (fieldDef.bonuses.sell ?? 1) *
+        fertilizerSellMult(eq.fertilizer) *
+        mutationSellMult(mutation),
+    )
+    const tractor = eq.tractorId ? TRACTORS[eq.tractorId] : null
+    if (tractor) price = Math.floor(price * (1 + tractor.sellBonus))
     return Math.max(1, price)
   }
 
   growthMult(): number {
-    return this.upgrades.growthSpeedMult * prestigeGrowthMult(this.prestigeLevel)
+    const eq = this.fieldManager.activeEquipment()
+    const fieldDef = FIELDS[this.fieldManager.activeId]
+    return (
+      this.upgrades.growthSpeedMult *
+      COZY_GROWTH_BOOST *
+      prestigeGrowthMult(this.prestigeLevel) *
+      (fieldDef.bonuses.growth ?? 1) *
+      irrigationGrowthMult(eq.irrigation) *
+      this.worldEvents.growthMult()
+    )
+  }
+
+  mutationMult(): number {
+    const eq = this.fieldManager.activeEquipment()
+    const fieldDef = FIELDS[this.fieldManager.activeId]
+    const tractor = eq.tractorId ? TRACTORS[eq.tractorId] : null
+    return (
+      (fieldDef.bonuses.mutation ?? 1) *
+      fertilizerMutationMult(eq.fertilizer) *
+      this.worldEvents.mutationMult() *
+      (1 + (tractor?.mutationBonus ?? 0))
+    )
+  }
+
+  harvestRadius(): number {
+    const eq = this.fieldManager.activeEquipment()
+    const tractorR = eq.tractorId ? TRACTORS[eq.tractorId].harvestRadius : 0
+    return Math.max(this.upgrades.tractorRadius, tractorR)
   }
 
   private trackCoinsEarned(amount: number): void {
@@ -196,13 +269,13 @@ export class GameLoop {
   }
 
   private refreshShopBinding(): void {
-    this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredHybrids)
+    this.shop = new Shop(this.coins, this.inventory, this.upgrades.owned, this.discoveredCrops)
   }
 
   snapshot() {
     return {
       coins: this.coins.value,
-      farm: this.farm,
+      fieldManager: this.fieldManager,
       inventory: this.inventory,
       upgrades: this.upgrades.owned,
       decors: this.upgrades.unlockedDecors,
@@ -219,10 +292,14 @@ export class GameLoop {
       activeQuestId: this.quests.activeId,
       questProgress: this.quests.progress,
       completedQuestIds: [...this.quests.completed],
-      discoveredHybrids: this.discoveredHybrids,
+      discoveredCrops: this.discoveredCrops,
       gameDay: this.gameDay,
       useRealSeason: this.useRealSeason,
       weather: this.weather.kind,
+      ownedTractors: this.ownedTractors,
+      journal: this.journal,
+      activeEvent: this.worldEvents.active?.kind ?? null,
+      eventTimer: this.worldEvents.active?.timer ?? 0,
     }
   }
 
@@ -236,13 +313,11 @@ export class GameLoop {
 
   tileSizePx(): number {
     const rect = this.canvas.getBoundingClientRect()
-    const w = rect.width
-    const h = rect.height
-    const maxSize = this.upgrades.maxPlotSize()
-    const m = Math.max(this.farm.w, maxSize)
-    const byW = (w - 120) / m - 10
-    const byH = (h - 180) / m - 10
-    return Math.max(40, Math.min(68, Math.floor(Math.min(byW, byH))))
+    return computeFarmLayout(this.farm, rect.width, rect.height).tileSize
+  }
+
+  private farmLayout(vw: number, vh: number): FarmLayout {
+    return computeFarmLayout(this.farm, vw, vh)
   }
 
   private canvasCoords(clientX: number, clientY: number): { sx: number; sy: number; vw: number; vh: number } {
@@ -256,9 +331,8 @@ export class GameLoop {
   }
 
   private cellCenter(gx: number, gy: number, vw: number, vh: number): { x: number; y: number } {
-    const tileSize = this.tileSizePx()
-    const { ox, oy } = farmScreenOffset(this.farm, this.upgrades.maxPlotSize(), tileSize, vw, vh)
-    const { cx, cy } = tilePixelPos(ox, oy, gx, gy, tileSize)
+    const layout = this.farmLayout(vw, vh)
+    const { cx, cy } = tilePixelPos(layout.ox, layout.oy, gx, gy, layout.tileSize, layout.gap)
     return { x: cx, y: cy - 8 }
   }
 
@@ -279,7 +353,8 @@ export class GameLoop {
 
   pointerDown(clientX: number, clientY: number, pointerId: number): void {
     const { sx, sy, vw, vh } = this.canvasCoords(clientX, clientY)
-    const hit = screenToGrid(sx, sy, this.farm, this.upgrades.maxPlotSize(), this.tileSizePx(), vw, vh)
+    const layout = this.farmLayout(vw, vh)
+    const hit = screenToGrid(sx, sy, this.farm, layout, vw, vh)
     if (!hit || hit.locked) return
 
     this.clickHighlight = { gx: hit.gx, gy: hit.gy, t: 1 }
@@ -291,20 +366,21 @@ export class GameLoop {
       /* ignore */
     }
 
-    if (this.tool === 'harvest') {
+    if (['hoe', 'water', 'plant', 'harvest'].includes(this.tool)) {
       this.dragging = true
       this.dragVisited.clear()
     }
-    this.applyAt(hit.gx, hit.gy, sx, sy, vw, vh, this.tool === 'harvest')
+    this.applyAt(hit.gx, hit.gy, sx, sy, vw, vh, true)
   }
 
   pointerMove(clientX: number, clientY: number): void {
     const { sx, sy, vw, vh } = this.canvasCoords(clientX, clientY)
-    const hit = screenToGrid(sx, sy, this.farm, this.upgrades.maxPlotSize(), this.tileSizePx(), vw, vh)
+    const layout = this.farmLayout(vw, vh)
+    const hit = screenToGrid(sx, sy, this.farm, layout, vw, vh)
     this.hoverHighlight = hit && !hit.locked ? { gx: hit.gx, gy: hit.gy } : null
     this.dragHighlight = hit && !hit.locked ? { gx: hit.gx, gy: hit.gy } : null
 
-    if (!this.dragging || this.tool !== 'harvest') return
+    if (!this.dragging) return
     if (!hit || hit.locked) return
     this.applyAt(hit.gx, hit.gy, sx, sy, vw, vh, true)
   }
@@ -355,16 +431,21 @@ export class GameLoop {
     }
     if (this.tool === 'plant') {
       if (!this.inventory.tryConsumeSeed(this.selectedCrop)) {
-        this.ui.onToast('Need seeds')
+        this.ui.onToast('Need seeds — open Shop')
         return
       }
+      const tile = this.farm.get(gx, gy)
+      if (tile?.kind === 'grass') {
+        this.farm.hoe(gx, gy)
+      }
       if (this.farm.plant(gx, gy, this.selectedCrop)) {
+        this.farm.water(gx, gy)
         this.particles.sparkles(sx, sy, 3)
         Sfx.plant()
         return
       }
       this.inventory.addSeeds(this.selectedCrop, 1)
-      this.ui.onToast('Till soil first')
+      this.ui.onToast('Can\'t plant here')
       return
     }
     if (this.tool === 'harvest') {
@@ -373,7 +454,7 @@ export class GameLoop {
   }
 
   private harvestAt(gx: number, gy: number, vw: number, vh: number): void {
-    const radius = this.upgrades.tractorRadius
+    const radius = this.harvestRadius()
     const candidates = this.farm.collectMatureInRadius(gx, gy, radius)
     if (candidates.length === 0) return
 
@@ -385,15 +466,24 @@ export class GameLoop {
 
     const toPick = candidates.slice(0, free)
     const overflow = candidates.length > free
-    const harvested: CropId[] = []
+    const harvested: GameCropId[] = []
+    let bonusCoins = 0
 
     for (const { gx: cx, gy: cy } of toPick) {
+      const tile = this.farm.get(cx, cy)
+      const mutation = tile?.mutation
       const id = this.farm.pickCrop(cx, cy)
       if (!id) continue
       harvested.push(id)
       const p = this.cellCenter(cx, cy, vw, vh)
-      const def = CROPS[id]
+      const def = getCrop(id)
       this.particles.harvestJuice(p.x, p.y, def.top, def.emoji)
+      if (mutation) {
+        this.journal.discoverMutation(mutation)
+        const extra = Math.floor(this.unitSellPrice(id, mutation) * 0.5)
+        bonusCoins += extra
+        this.particles.floatText(p.x, p.y - 20, `${MUTATION_EMOJI[mutation]} +${extra}`)
+      }
     }
 
     if (harvested.length === 0) return
@@ -408,7 +498,6 @@ export class GameLoop {
     this.checkAchievements()
 
     const comboMult = 1 + comboBonus(this.combo, this.upgrades.harvestSpeedMult)
-    let bonusCoins = 0
 
     for (const id of harvested) {
       this.inventory.addHarvest(id, 1)
@@ -470,8 +559,8 @@ export class GameLoop {
     this.ui.onToolMode(t)
   }
 
-  setCrop(c: CropId): void {
-    this.selectedCrop = c
+  setCrop(c: CropId | string): void {
+    this.selectedCrop = c as CropId
     this.ui.onSelectedCrop(c)
   }
 
@@ -485,6 +574,76 @@ export class GameLoop {
       this.ui.onInventoryRefresh()
     }
     if (p === 'journal') this.ui.onJournalRefresh?.()
+    if (p === 'empire') this.ui.onEmpireRefresh?.()
+  }
+
+  switchField(id: FieldId): void {
+    if (!this.fieldManager.switchField(id)) return
+    this.upgrades.setFarm(this.farm)
+    this.ui.onFieldChange?.(FIELDS[id].name)
+    this.ui.onToast(`${FIELDS[id].emoji} ${FIELDS[id].name}`)
+    saveGame(this.snapshot())
+  }
+
+  unlockField(id: FieldId): boolean {
+    if (this.fieldManager.unlockField(id, this.coins)) {
+      this.journal.discoverField(id)
+      this.ui.onToast(`${FIELDS[id].emoji} ${FIELDS[id].name} unlocked!`)
+      this.switchField(id)
+      this.ui.onEmpireRefresh?.()
+      saveGame(this.snapshot())
+      return true
+    }
+    this.ui.onToast(`Need ${FIELDS[id].unlockCost}¢ to unlock ${FIELDS[id].name}`)
+    return false
+  }
+
+  buyTractor(id: TractorId): boolean {
+    const t = TRACTORS[id]
+    if (this.ownedTractors.has(id)) return false
+    if (this.coins.value < t.unlockCost) {
+      this.ui.onToast('Not enough coins')
+      return false
+    }
+    this.coins.value -= t.unlockCost
+    this.ownedTractors.add(id)
+    this.journal.discoverTractor(id)
+    this.celebrate(t.emoji, t.name)
+    this.ui.onToast(`Assign ${t.name} to a field in Empire ↑`)
+    this.tractorPulse = 1.5
+    this.ui.onEmpireRefresh?.()
+    saveGame(this.snapshot())
+    return true
+  }
+
+  assignTractor(fieldId: FieldId, tractorId: TractorId | null): void {
+    if (tractorId && !this.ownedTractors.has(tractorId)) return
+    this.fieldManager.assignTractor(fieldId, tractorId)
+    const t = tractorId ? TRACTORS[tractorId] : null
+    if (t) this.ui.onToast(`${t.emoji} ${t.name} → ${FIELDS[fieldId].name}`)
+    else this.ui.onToast(`No tractor on ${FIELDS[fieldId].name}`)
+    this.ui.onEmpireRefresh?.()
+    saveGame(this.snapshot())
+  }
+
+  upgradeFieldIrrigation(fieldId: FieldId): boolean {
+    if (this.fieldManager.upgradeIrrigation(fieldId, this.coins)) {
+      this.ui.onToast('Irrigation upgraded!')
+      this.ui.onEmpireRefresh?.()
+      saveGame(this.snapshot())
+      return true
+    }
+    return false
+  }
+
+  upgradeFieldFertilizer(fieldId: FieldId): boolean {
+    if (this.fieldManager.upgradeFertilizer(fieldId, this.coins)) {
+      this.ui.onToast('Fertilizer upgraded!')
+      this.ui.onEmpireRefresh?.()
+      saveGame(this.snapshot())
+      return true
+    }
+    return false
   }
 
   buySeed(id: CropId): void {
@@ -520,6 +679,10 @@ export class GameLoop {
     const ok = this.upgrades.tryPurchase(node, this.coins)
     if (ok) {
       this.upgrades.applyPendingLandExpansion()
+      if (this.fieldManager.activeId === 'starter') {
+        this.fieldManager.starterExpansions = this.upgrades.expansionsPurchased
+        this.fieldManager.applyStarterExpansion()
+      }
       if (this.farm.w > prevSize) {
         this.expansionAnim = 1
         Sfx.unlock()
@@ -564,41 +727,49 @@ export class GameLoop {
     saveGame(this.snapshot())
   }
 
-  tryBreed(parentA: CropId, parentB: CropId): boolean {
-    const recipe = findRecipe(parentA, parentB)
+  tryBreed(parentA: string, parentB: string): boolean {
+    const recipe = findDiscoveryRecipe(parentA, parentB)
     if (!recipe) {
-      this.ui.onToast('Those crops cannot breed')
+      this.ui.onToast('Those crops cannot combine')
       return false
     }
     if (this.coins.value < recipe.cost) {
-      this.ui.onToast('Need more coins for breeding')
+      this.ui.onToast('Need more coins for discovery')
       return false
     }
-    const seedsA = this.inventory.seeds.get(recipe.parentA) ?? 0
-    const seedsB = this.inventory.seeds.get(recipe.parentB) ?? 0
+    const seedsA = this.inventory.seeds.get(parentA) ?? 0
+    const seedsB = this.inventory.seeds.get(parentB) ?? 0
     if (seedsA < 1 || seedsB < 1) {
       this.ui.onToast('Need 1 seed of each parent crop')
       return false
     }
     this.coins.value -= recipe.cost
-    this.inventory.seeds.set(recipe.parentA, seedsA - 1)
-    this.inventory.seeds.set(recipe.parentB, seedsB - 1)
-    if (this.inventory.seeds.get(recipe.parentA) === 0) this.inventory.seeds.delete(recipe.parentA)
-    if (this.inventory.seeds.get(recipe.parentB) === 0) this.inventory.seeds.delete(recipe.parentB)
-    this.inventory.addSeeds(recipe.result, recipe.seedYield)
-    const wasNew = !this.discoveredHybrids.has(recipe.result)
-    this.discoveredHybrids.add(recipe.result)
-    if (wasNew) {
+    this.inventory.seeds.set(parentA, seedsA - 1)
+    this.inventory.seeds.set(parentB, seedsB - 1)
+    if (this.inventory.seeds.get(parentA) === 0) this.inventory.seeds.delete(parentA)
+    if (this.inventory.seeds.get(parentB) === 0) this.inventory.seeds.delete(parentB)
+    this.inventory.addSeeds(recipe.result, 3)
+    const wasNew = !this.discoveredCrops.has(recipe.result)
+    this.discoveredCrops.add(recipe.result)
+    if (wasNew && this.journal.discoverCrop(recipe.result)) {
       this.achievements.stats.hybridsDiscovered += 1
+      this.celebrate(recipe.emoji, recipe.name)
       this.checkAchievements()
     }
     Sfx.plant()
-    this.ui.onToast(`Bred ${CROPS[recipe.result].emoji} ${CROPS[recipe.result].name}!`)
+    this.ui.onToast(`Discovered ${recipe.emoji} ${recipe.name}!`)
     this.refreshShopBinding()
     this.pushHud()
     this.ui.onJournalRefresh?.()
     saveGame(this.snapshot())
     return true
+  }
+
+  private celebrate(emoji: string, name: string): void {
+    this.celebration = { emoji, name, t: 2.2 }
+    this.ui.onDiscovery?.(emoji, name)
+    Sfx.unlock()
+    this.shake = 0.25
   }
 
   deliverQuest(): void {
@@ -661,9 +832,13 @@ export class GameLoop {
     this.achievements.stats.prestiges = this.prestigeLevel
     const bonus = prestigeRewardCoins(this.prestigeLevel)
     this.coins.value = 120 + bonus
-    this.farm = new Farm(BASE_PLOT_SIZE, BASE_PLOT_SIZE)
+    const starter = this.fieldManager.fields.get('starter')!
+    starter.reset(BASE_PLOT_SIZE, BASE_PLOT_SIZE)
+    this.fieldManager.starterExpansions = 0
+    this.fieldManager.activeId = 'starter'
     this.inventory.harvest.clear()
     this.upgrades = new UpgradesSystem(this.inventory, this.farm)
+    this.upgrades.setFarm(this.farm)
     this.upgrades.owned.clear()
     decor.forEach((id) => this.upgrades.owned.add(id))
     DEFAULT_UPGRADES.forEach((id) => this.upgrades.owned.add(id))
@@ -737,14 +912,29 @@ export class GameLoop {
     }
 
     if (this.weather.tick(dt)) this.pushSeasonWeather()
+    const newEvent = this.worldEvents.tick(dt)
+    if (newEvent) {
+      const bonus = this.worldEvents.coinBonus()
+      if (bonus > 0) {
+        this.coins.value += bonus
+        this.trackCoinsEarned(bonus)
+      }
+      this.ui.onWorldEvent?.(`${EVENT_EMOJI[newEvent]} ${EVENT_LABEL[newEvent]}!`)
+      this.ui.onToast(`${EVENT_EMOJI[newEvent]} ${EVENT_LABEL[newEvent]}!`)
+    }
+
+    if (this.celebration && this.celebration.t > 0) {
+      this.celebration.t = Math.max(0, this.celebration.t - dt)
+      if (this.celebration.t <= 0) this.celebration = null
+    }
 
     const season = this.currentSeason()
     const wGrowth = weatherGrowthMult(this.weather.kind)
     const wWater = weatherWaterMult(this.weather.kind)
 
-    while (this.accumulator >= 1 / 30) {
-      this.accumulator -= 1 / 30
-      this.farm.tickGrowth(1 / 30, this.growthMult(), season, wGrowth)
+    while (this.accumulator >= 1 / 20) {
+      this.accumulator -= 1 / 20
+      this.farm.tickGrowth(1 / 20, this.growthMult(), season, wGrowth * this.worldEvents.growthMult(), this.mutationMult())
     }
 
     const autoActions = this.automation.tick(
@@ -806,21 +996,26 @@ export class GameLoop {
       this.ctx.translate((Math.random() - 0.5) * mag, (Math.random() - 0.5) * mag)
     }
 
-    drawSceneLayers(this.ctx, vw, vh, this.time)
+    const fieldDef = FIELDS[this.fieldManager.activeId]
+
+    drawSceneLayers(this.ctx, vw, vh, this.time, fieldDef.theme)
     this.particles.tickAmbient(vw, vh, dt)
 
-    const tileSize = this.tileSizePx()
-    const maxPlot = this.upgrades.maxPlotSize()
-    const { ox, oy } = farmScreenOffset(this.farm, maxPlot, tileSize, vw, vh)
+    const layout = this.farmLayout(vw, vh)
+    const eq = this.fieldManager.activeEquipment()
+    const tractorDef = eq.tractorId ? TRACTORS[eq.tractorId] : undefined
 
     const frame: RenderFrame = {
       farm: this.farm,
-      maxPlotSize: maxPlot,
-      tileSize,
-      decoSpots: this.decoLayout(vw, vh, ox, oy),
+      maxPlotSize: layout.plot,
+      gridGap: layout.gap,
+      tileSize: layout.tileSize,
+      fieldTheme: fieldDef.theme,
+      decoSpots: this.decoLayout(vw, vh, layout.ox, layout.oy),
       tractorPulse: this.tractorPulse,
-      tractorRadius: this.upgrades.tractorRadius,
-      hasTractor: this.upgrades.tractorRadius > 0,
+      tractorRadius: this.harvestRadius(),
+      hasTractor: Boolean(eq.tractorId),
+      tractorDef,
       growthSpeedMult: this.growthMult(),
       dragHighlight: this.dragHighlight,
       hoverHighlight: this.hoverHighlight,
@@ -828,7 +1023,7 @@ export class GameLoop {
       expansionAnim: this.expansionAnim,
       autoFlashes: this.automation.recentFlashes,
       weather: this.weather.kind,
-      petSpots: activePets(this.automation.levels, ox, oy, this.farm.w * tileSize),
+      petSpots: activePets(this.automation.levels, layout.ox, layout.oy, layout.tw),
     }
     renderFarm(this.ctx, frame, this.time, vw, vh)
 

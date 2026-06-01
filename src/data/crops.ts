@@ -21,8 +21,10 @@ export type CropId =
 export type CropRarity = 'common' | 'uncommon' | 'rare' | 'gold' | 'rainbow'
 export type CropSeason = 'spring' | 'summer' | 'autumn' | 'winter' | 'yearRound'
 
+export type GameCropId = CropId | string
+
 export interface CropDefinition {
-  id: CropId
+  id: GameCropId
   name: string
   emoji: string
   rarity: CropRarity
@@ -335,9 +337,9 @@ export const CROP_BY_SEASON: Record<CropSeason, CropDefinition[]> = {
 export function cropUnlocked(
   def: CropDefinition,
   ownedUpgrades: Set<string>,
-  discoveredHybrids: Set<string> = new Set(),
+  discovered: Set<string> = new Set(),
 ): boolean {
-  if (def.isHybrid) return discoveredHybrids.has(def.id)
+  if (isDiscoveredCropId(def.id) || def.isHybrid) return discovered.has(def.id)
   if (!def.unlockUpgradeId) return true
   return ownedUpgrades.has(def.unlockUpgradeId)
 }
@@ -362,11 +364,28 @@ export function secondsRemaining(
 ): number {
   const left = 1 - growth
   if (left <= 0) return 0
-  const waterBoost = watered ? 1.35 : 1
+  const waterBoost = watered ? 1.55 : 1
   const rate = (growthSpeedMult * waterBoost) / Math.max(0.5, baseGrowSeconds)
   return Math.ceil(left / rate)
 }
 
 export function isMultiHarvest(def: CropDefinition): boolean {
   return (def.maxHarvests ?? 1) > 1
+}
+
+import { DISCOVERED_CROPS } from './discoveredCrops'
+
+export function getCrop(id: string): CropDefinition {
+  const base = (CROPS as Record<string, CropDefinition>)[id]
+  if (base) return base
+  const disc = (DISCOVERED_CROPS as Record<string, CropDefinition>)[id]
+  if (disc) return disc
+  return CROPS.turnip
+}
+
+export const ALL_CROPS = { ...CROPS, ...DISCOVERED_CROPS } as Record<string, CropDefinition>
+export const ALL_CROP_LIST = Object.values(ALL_CROPS)
+
+export function isDiscoveredCropId(id: string): boolean {
+  return id.startsWith('disc_')
 }

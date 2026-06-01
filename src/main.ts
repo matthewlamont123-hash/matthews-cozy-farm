@@ -1,12 +1,29 @@
 import './style.css'
-import { CROP_LIST, CROPS, cropUnlocked, RARITY_LABEL, SEASON_LABEL, type CropId } from './data/crops'
+import {
+  CROP_LIST,
+  CROPS,
+  cropUnlocked,
+  getCrop,
+  isDiscoveredCropId,
+  RARITY_LABEL,
+  SEASON_LABEL,
+  type CropId,
+} from './data/crops'
+import { DISCOVERY_RECIPES } from './data/discoveries'
+import {
+  FIELD_LIST,
+  FERTILIZER_LABEL,
+  IRRIGATION_LABEL,
+  tractorEffectTags,
+  type FieldId,
+} from './data/fields'
+import { TRACTOR_LIST, TRACTORS, type TractorId } from './data/tractors'
 import type { UpgradeCategory } from './data/upgrades'
 import { UPGRADE_NODES } from './data/upgrades'
 import type { PanelId } from './game/Game'
 import { GameLoop } from './game/Game'
 import { Sfx } from './game/Audio'
 import type { ToolMode } from './game/types'
-import { HYBRID_RECIPES } from './data/hybrids'
 import { ACHIEVEMENTS } from './systems/Achievements'
 import { isInSeason, SEASON_EMOJI } from './systems/Seasons'
 import { WEATHER_EMOJI, WEATHER_LABEL } from './systems/Weather'
@@ -39,12 +56,20 @@ const dailyLabel = document.getElementById('daily-label')!
 const seasonBadge = document.getElementById('season-badge')!
 const weatherBadge = document.getElementById('weather-badge')!
 const prestigeBadge = document.getElementById('prestige-badge')!
+const fieldBadge = document.getElementById('field-badge')!
+const eventBanner = document.getElementById('event-banner')!
+const fieldStrip = document.getElementById('field-strip')!
+const tractorStatusEl = document.getElementById('tractor-status')!
+const celebrationEl = document.getElementById('celebration')!
+const celebrationEmoji = document.getElementById('celebration-emoji')!
+const celebrationName = document.getElementById('celebration-name')!
 
 const panels = {
   shop: document.getElementById('panel-shop')!,
   upgrades: document.getElementById('panel-upgrades')!,
   inventory: document.getElementById('panel-inventory')!,
   journal: document.getElementById('panel-journal')!,
+  empire: document.getElementById('panel-empire')!,
 }
 
 function showToast(text: string): void {
@@ -66,20 +91,136 @@ function bumpCapacity(): void {
   window.setTimeout(() => capacityBtn.classList.remove('bump'), 220)
 }
 
+function showCelebration(emoji: string, name: string): void {
+  celebrationEmoji.textContent = emoji
+  celebrationName.textContent = name
+  celebrationEl.classList.remove('hidden')
+  celebrationEl.classList.add('pop')
+  window.clearTimeout((showCelebration as unknown as { t?: number }).t)
+  ;(showCelebration as unknown as { t: number }).t = window.setTimeout(() => {
+    celebrationEl.classList.add('hidden')
+    celebrationEl.classList.remove('pop')
+  }, 2600)
+}
+
+function showEventBanner(label: string): void {
+  eventBanner.textContent = label
+  eventBanner.classList.remove('hidden')
+  eventBanner.classList.add('pulse')
+  window.clearTimeout((showEventBanner as unknown as { t?: number }).t)
+  ;(showEventBanner as unknown as { t: number }).t = window.setTimeout(() => {
+    eventBanner.classList.add('hidden')
+    eventBanner.classList.remove('pulse')
+  }, 5000)
+}
+
+function cropLabel(id: string, loop: GameLoop): { emoji: string; name: string } {
+  if (isDiscoveredCropId(id)) {
+    const known = loop.discoveredCrops.has(id)
+    if (!known) return { emoji: '❓', name: '???' }
+    const r = DISCOVERY_RECIPES.find((x) => x.result === id)
+    return { emoji: r?.emoji ?? '🌱', name: r?.name ?? 'Unknown' }
+  }
+  const def = CROPS[id as CropId]
+  return def ? { emoji: def.emoji, name: def.name } : { emoji: '🌱', name: id }
+}
+
 function populateCropSelect(loop: GameLoop): void {
   cropSelect.innerHTML = ''
+  const options: { id: string; label: string; disabled: boolean }[] = []
   for (const c of CROP_LIST) {
-    const opt = document.createElement('option')
-    opt.value = c.id
-    const multi = c.maxHarvests && c.maxHarvests > 1 ? ` · ×${c.maxHarvests}` : ''
-    opt.textContent = `${c.emoji} ${c.name}${multi}`
-    if (!cropUnlocked(c, loop.upgrades.owned, loop.discoveredHybrids)) {
-      opt.disabled = true
-      opt.textContent += c.isHybrid ? ' (breed)' : ' (upgrade)'
+    const unlocked = cropUnlocked(c, loop.upgrades.owned, loop.discoveredCrops)
+    options.push({
+      id: c.id,
+      label: `${c.emoji} ${c.name}${c.maxHarvests && c.maxHarvests > 1 ? ` · ×${c.maxHarvests}` : ''}`,
+      disabled: !unlocked,
+    })
+  }
+  for (const r of DISCOVERY_RECIPES) {
+    if (!loop.discoveredCrops.has(r.result)) continue
+    const seeds = loop.inventory.seeds.get(r.result) ?? 0
+    if (seeds <= 0 && !options.some((o) => o.id === r.result)) {
+      options.push({ id: r.result, label: `${r.emoji} ${r.name} (discovered)`, disabled: false })
+    } else if (seeds > 0) {
+      options.push({ id: r.result, label: `${r.emoji} ${r.name} · ${seeds} seeds`, disabled: false })
     }
-    cropSelect.appendChild(opt)
+  }
+  for (const opt of options) {
+    const el = document.createElement('option')
+    el.value = opt.id
+    el.textContent = opt.label + (opt.disabled ? ' (locked)' : '')
+    el.disabled = opt.disabled
+    cropSelect.appendChild(el)
   }
   cropSelect.value = loop.selectedCrop
+}
+
+function updateTractorStatus(loop: GameLoop): void {
+  const eq = loop.fieldManager.activeEquipment()
+  const field = FIELD_LIST.find((f) => f.id === loop.fieldManager.activeId)
+  if (!eq.tractorId) {
+    tractorStatusEl.textContent = '🚜 No tractor assigned'
+    tractorStatusEl.title = 'Open Empire to buy and assign a tractor to this field'
+    return
+  }
+  const t = TRACTORS[eq.tractorId]
+  const tags = tractorEffectTags(t).slice(0, 2).join(' · ')
+  tractorStatusEl.textContent = `${t.emoji} ${t.name}${tags ? ` · ${tags}` : ''}`
+  tractorStatusEl.title = `${t.description} (${field?.name ?? 'field'})`
+}
+
+function buildFieldStrip(loop: GameLoop): void {
+  fieldStrip.innerHTML = ''
+  const unlockedCount = loop.fieldManager.unlocked.size
+  const label = document.createElement('span')
+  label.className = 'field-bar-label'
+  label.textContent = `Fields ${unlockedCount}/${FIELD_LIST.length}`
+  fieldStrip.appendChild(label)
+
+  for (const f of FIELD_LIST) {
+    const unlocked = loop.fieldManager.unlocked.has(f.id)
+    const active = loop.fieldManager.activeId === f.id
+    const canAfford = loop.coins.value >= f.unlockCost
+    const size =
+      f.id === 'starter'
+        ? `${loop.fieldManager.maxPlotSize()}×${loop.fieldManager.maxPlotSize()}`
+        : `${f.baseSize}×${f.baseSize}`
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className =
+      'field-chip' +
+      (active ? ' active' : '') +
+      (!unlocked ? ' locked' : '') +
+      (!unlocked && canAfford ? ' can-afford' : '')
+    btn.title = unlocked
+      ? `${f.description} (${size})`
+      : canAfford
+        ? `Tap to unlock for ${f.unlockCost}¢`
+        : `Unlock in Empire for ${f.unlockCost}¢`
+    btn.innerHTML = unlocked
+      ? `${f.emoji} ${f.name} <span class="field-chip-size">${size}</span>`
+      : `🔒 ${f.emoji} ${f.unlockCost}¢`
+    btn.addEventListener('click', () => {
+      Sfx.ui()
+      if (unlocked) {
+        loop.switchField(f.id)
+        buildFieldStrip(loop)
+        updateTractorStatus(loop)
+        return
+      }
+      if (canAfford && f.unlockCost > 0) {
+        loop.unlockField(f.id)
+        buildFieldStrip(loop)
+        updateTractorStatus(loop)
+        return
+      }
+      loop.openPanel('empire')
+      showToast(`Save ${f.unlockCost}¢ to unlock ${f.name}`)
+    })
+    fieldStrip.appendChild(btn)
+  }
+  const activeField = FIELD_LIST.find((f) => f.id === loop.fieldManager.activeId)
+  fieldBadge.textContent = `${activeField?.emoji ?? '🌱'} ${activeField?.name ?? 'Field'}`
 }
 
 function buildShop(loop: GameLoop): void {
@@ -178,9 +319,36 @@ function buildUpgrades(loop: GameLoop): void {
 
 function buildJournal(loop: GameLoop): void {
   const qRoot = document.getElementById('journal-quests')!
+  const dRoot = document.getElementById('journal-discover')!
   const bRoot = document.getElementById('journal-breed')!
   const aRoot = document.getElementById('journal-achieve')!
   const pRoot = document.getElementById('journal-prestige')!
+
+  const cropPct = loop.journal.cropCompletion()
+  const recipePct = loop.journal.recipeCompletion()
+  dRoot.innerHTML = `
+    <div class="journal-card">
+      <strong>Discovery progress</strong>
+      <p class="muted small">Crops ${cropPct}% · Recipes ${recipePct}% · Fields ${loop.journal.fieldCompletion(loop.fieldManager.unlocked)}% · Tractors ${loop.journal.tractorCompletion(loop.ownedTractors)}%</p>
+      <div class="progress-bar"><div class="progress-fill" style="width:${recipePct}%"></div></div>
+    </div>
+    <div class="discovery-grid">
+      ${DISCOVERY_RECIPES.map((r) => {
+        const known = loop.discoveredCrops.has(r.result)
+        const pa = cropLabel(r.parentA, loop)
+        const pb = cropLabel(r.parentB, loop)
+        return `
+          <div class="journal-card discovery-card ${known ? 'owned' : ''} rarity-${r.rarity}">
+            <strong>${known ? r.emoji : '❓'} ${known ? r.name : '???'}</strong>
+            <p class="muted tiny">${pa.emoji}+${pb.emoji} · ${RARITY_LABEL[r.rarity]} · ${r.cost}¢</p>
+            ${known ? `<span class="tag tiny">Discovered</span>` : `<button type="button" data-breed-a="${r.parentA}" data-breed-b="${r.parentB}">Combine</button>`}
+          </div>`
+      }).join('')}
+    </div>`
+
+  dRoot.querySelectorAll<HTMLButtonElement>('[data-breed-a]').forEach((btn) => {
+    btn.addEventListener('click', () => loop.tryBreed(btn.dataset.breedA!, btn.dataset.breedB!))
+  })
 
   const q = loop.quests.activeQuest()
   if (q) {
@@ -198,22 +366,19 @@ function buildJournal(loop: GameLoop): void {
     qRoot.innerHTML = `<div class="muted">All quests done for now. Check back later!</div>`
   }
 
-  bRoot.innerHTML = HYBRID_RECIPES.map((r) => {
-    const known = loop.discoveredHybrids.has(r.result)
-    const res = CROPS[r.result]
-    const pa = CROPS[r.parentA]
-    const pb = CROPS[r.parentB]
+  bRoot.innerHTML = DISCOVERY_RECIPES.slice(0, 24).map((r) => {
+    const known = loop.discoveredCrops.has(r.result)
+    const pa = cropLabel(r.parentA, loop)
+    const pb = cropLabel(r.parentB, loop)
     return `
       <div class="journal-card ${known ? 'owned' : ''}">
-        <strong>${known ? res.emoji : '❓'} ${known ? res.name : 'Unknown hybrid'}</strong>
-        <p class="muted small">${pa.emoji}+${pb.emoji} → ${known ? res.name : '?'} · ${r.cost}¢</p>
-        <button type="button" data-breed-a="${r.parentA}" data-breed-b="${r.parentB}">Breed</button>
+        <strong>${known ? r.emoji : '❓'} ${known ? r.name : 'Unknown crop'}</strong>
+        <p class="muted small">${pa.emoji}+${pb.emoji} → ${known ? r.name : '?'} · ${r.cost}¢</p>
+        <button type="button" data-breed-a="${r.parentA}" data-breed-b="${r.parentB}" ${known ? 'disabled' : ''}>Combine</button>
       </div>`
-  }).join('')
+  }).join('') + `<p class="muted small">See Discover tab for all ${DISCOVERY_RECIPES.length} recipes.</p>`
   bRoot.querySelectorAll<HTMLButtonElement>('[data-breed-a]').forEach((btn) => {
-    btn.addEventListener('click', () =>
-      loop.tryBreed(btn.dataset.breedA as CropId, btn.dataset.breedB as CropId),
-    )
+    btn.addEventListener('click', () => loop.tryBreed(btn.dataset.breedA!, btn.dataset.breedB!))
   })
 
   aRoot.innerHTML = ACHIEVEMENTS.map((a) => {
@@ -246,6 +411,104 @@ function buildJournal(loop: GameLoop): void {
   prestigeBadge.classList.toggle('hidden', loop.prestigeLevel <= 0)
 }
 
+function buildEmpire(loop: GameLoop): void {
+  const stats = document.getElementById('empire-stats')!
+  const fieldsRoot = document.getElementById('empire-fields')!
+  const tractorsRoot = document.getElementById('empire-tractors')!
+  stats.innerHTML = `
+    <p class="empire-intro">
+      <strong>How it works:</strong> Unlock fields below, tap them in the bar above the farm to visit.
+      Buy tractors in the garage, then assign <em>one tractor per field</em> — bonuses apply while you're on that field.
+    </p>`
+
+  fieldsRoot.innerHTML = FIELD_LIST.map((f) => {
+    const unlocked = loop.fieldManager.unlocked.has(f.id)
+    const active = loop.fieldManager.activeId === f.id
+    const eq = loop.fieldManager.equipment[f.id]
+    const assigned = eq.tractorId ? TRACTORS[eq.tractorId] : null
+    const tractorOpts = TRACTOR_LIST.filter((t) => loop.ownedTractors.has(t.id))
+      .map(
+        (t) =>
+          `<option value="${t.id}" ${eq.tractorId === t.id ? 'selected' : ''}>${t.emoji} ${t.name}</option>`,
+      )
+      .join('')
+    const size = f.id === 'starter' ? `${loop.fieldManager.maxPlotSize()}×${loop.fieldManager.maxPlotSize()}` : `${f.baseSize}×${f.baseSize}`
+    return `
+      <article class="journal-card empire-card ${unlocked ? '' : 'dim'} ${active ? 'owned' : ''}">
+        <div class="empire-head"><span>${f.emoji}</span><strong>${f.name}</strong><span class="tag tiny">${size}</span>${active ? '<span class="tag tiny">Here now</span>' : ''}</div>
+        <p class="muted tiny">${f.description}</p>
+        <p class="tiny">💧 ${IRRIGATION_LABEL[eq.irrigation]} · 🌿 ${FERTILIZER_LABEL[eq.fertilizer]}</p>
+        ${unlocked && assigned ? `<p class="tiny">${assigned.emoji} <strong>${assigned.name}</strong> — ${tractorEffectTags(assigned).join(' · ')}</p>` : ''}
+        <div class="row-actions">
+          ${unlocked
+            ? `<button type="button" data-field-go="${f.id}">${active ? 'Playing here' : 'Visit field'}</button>
+               <button type="button" data-field-irr="${f.id}" ${eq.irrigation >= 3 ? 'disabled' : ''}>💧 Irrigation</button>
+               <button type="button" data-field-fert="${f.id}" ${eq.fertilizer >= 3 ? 'disabled' : ''}>🌿 Fertilizer</button>`
+            : `<button type="button" data-field-unlock="${f.id}">Unlock for ${f.unlockCost}¢</button>`}
+        </div>
+        ${
+          unlocked
+            ? `<div class="tractor-assign">
+                 <label for="tractor-${f.id}">Tractor on this field</label>
+                 <select id="tractor-${f.id}" data-field-tractor="${f.id}">
+                   <option value="">— None —</option>
+                   ${tractorOpts}
+                 </select>
+               </div>`
+            : ''
+        }
+      </article>`
+  }).join('')
+
+  fieldsRoot.querySelectorAll<HTMLButtonElement>('[data-field-go]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      loop.switchField(btn.dataset.fieldGo as FieldId)
+      buildFieldStrip(loop)
+      updateTractorStatus(loop)
+      buildEmpire(loop)
+    })
+  })
+  fieldsRoot.querySelectorAll<HTMLButtonElement>('[data-field-unlock]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      loop.unlockField(btn.dataset.fieldUnlock as FieldId)
+      buildFieldStrip(loop)
+      updateTractorStatus(loop)
+    })
+  })
+  fieldsRoot.querySelectorAll<HTMLButtonElement>('[data-field-irr]').forEach((btn) => {
+    btn.addEventListener('click', () => loop.upgradeFieldIrrigation(btn.dataset.fieldIrr as FieldId))
+  })
+  fieldsRoot.querySelectorAll<HTMLButtonElement>('[data-field-fert]').forEach((btn) => {
+    btn.addEventListener('click', () => loop.upgradeFieldFertilizer(btn.dataset.fieldFert as FieldId))
+  })
+  fieldsRoot.querySelectorAll<HTMLSelectElement>('[data-field-tractor]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const id = sel.dataset.fieldTractor as FieldId
+      const val = sel.value as TractorId | ''
+      loop.assignTractor(id, val || null)
+    })
+  })
+
+  tractorsRoot.innerHTML = TRACTOR_LIST.map((t) => {
+    const owned = loop.ownedTractors.has(t.id)
+    const tags = tractorEffectTags(t)
+      .map((tag) => `<span class="tractor-tag">${tag}</span>`)
+      .join('')
+    return `
+      <article class="journal-card ${owned ? 'owned' : ''}">
+        <strong>${t.emoji} ${t.name}</strong>
+        <p class="muted tiny">${t.description}</p>
+        <div class="tractor-tags">${tags}</div>
+        <div class="row-actions">
+          ${owned ? '<span class="tag">In garage — assign above ↑</span>' : `<button type="button" data-buy-tractor="${t.id}">${t.unlockCost === 0 ? 'Starter (owned)' : `Buy for ${t.unlockCost}¢`}</button>`}
+        </div>
+      </article>`
+  }).join('')
+  tractorsRoot.querySelectorAll<HTMLButtonElement>('[data-buy-tractor]').forEach((btn) => {
+    btn.addEventListener('click', () => loop.buyTractor(btn.dataset.buyTractor as TractorId))
+  })
+}
+
 function setJournalTab(tab: string): void {
   document.querySelectorAll('.journal-tabs .tab').forEach((t) => {
     t.classList.toggle('active', (t as HTMLButtonElement).dataset.tab === tab)
@@ -266,7 +529,7 @@ function buildInventory(loop: GameLoop): void {
     return
   }
   for (const [id, qty] of loop.inventory.sortedHarvest()) {
-    const def = CROPS[id]
+    const def = getCrop(id)
     const row = document.createElement('div')
     row.className = `row rarity-row rarity-${def.rarity}`
     row.title = `${def.name} — ${RARITY_LABEL[def.rarity]} · ${loop.unitSellPrice(id)}¢ each`
@@ -309,6 +572,10 @@ function setPanelVisible(loop: GameLoop, id: PanelId): void {
     panels.journal.classList.remove('hidden')
     panels.journal.setAttribute('aria-hidden', 'false')
     panels.journal.removeAttribute('inert')
+  } else if (id === 'empire') {
+    panels.empire.classList.remove('hidden')
+    panels.empire.setAttribute('aria-hidden', 'false')
+    panels.empire.removeAttribute('inert')
   }
 
   document.body.classList.toggle('panel-open', id !== 'none')
@@ -352,6 +619,21 @@ const game = new GameLoop(canvas, {
   },
   onInventoryRefresh: () => buildInventory(game),
   onJournalRefresh: () => buildJournal(game),
+  onEmpireRefresh: () => {
+    buildEmpire(game)
+    buildFieldStrip(game)
+    updateTractorStatus(game)
+  },
+  onDiscovery: (emoji, name) => {
+    showCelebration(emoji, name)
+    buildJournal(game)
+    populateCropSelect(game)
+  },
+  onWorldEvent: (label) => showEventBanner(label),
+  onFieldChange: () => {
+    buildFieldStrip(game)
+    updateTractorStatus(game)
+  },
   onAutomationStatus: (line) => {
     automationStatusEl.textContent = line
   },
@@ -437,6 +719,10 @@ document.getElementById('btn-inventory')!.addEventListener('click', () => {
   Sfx.ui()
   game.openPanel(game.panel === 'inventory' ? 'none' : 'inventory')
 })
+document.getElementById('btn-empire')!.addEventListener('click', () => {
+  Sfx.ui()
+  game.openPanel(game.panel === 'empire' ? 'none' : 'empire')
+})
 document.getElementById('btn-journal')!.addEventListener('click', () => {
   Sfx.ui()
   game.openPanel(game.panel === 'journal' ? 'none' : 'journal')
@@ -498,6 +784,9 @@ buildShop(game)
 buildUpgrades(game)
 buildInventory(game)
 buildJournal(game)
+buildEmpire(game)
+buildFieldStrip(game)
+updateTractorStatus(game)
 automationStatusEl.textContent = game.automation.statusLine()
 setPanelVisible(game, 'none')
 canvas.dataset.tool = game.tool

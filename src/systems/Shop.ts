@@ -1,17 +1,17 @@
-import { CROPS, cropUnlocked, type CropId } from '../data/crops'
+import { cropUnlocked, getCrop, type GameCropId } from '../data/crops'
 import type { Inventory } from './Inventory'
 
 export class Shop {
   private coinsRef: { value: number }
   private inventory: Inventory
   private ownedUpgrades: Set<string>
-  private discoveredHybrids: Set<CropId>
+  private discoveredHybrids: Set<string>
 
   constructor(
     coinsRef: { value: number },
     inventory: Inventory,
     ownedUpgrades: Set<string>,
-    discoveredHybrids: Set<CropId> = new Set(),
+    discoveredHybrids: Set<string> = new Set(),
   ) {
     this.coinsRef = coinsRef
     this.inventory = inventory
@@ -27,14 +27,14 @@ export class Shop {
     this.coinsRef.value = v
   }
 
-  canBuySeed(cropId: CropId): boolean {
-    const def = CROPS[cropId]
+  canBuySeed(cropId: GameCropId): boolean {
+    const def = getCrop(cropId)
     if (!cropUnlocked(def, this.ownedUpgrades, this.discoveredHybrids)) return false
     return this.coins >= def.seedBuyPrice
   }
 
-  buySeed(cropId: CropId): boolean {
-    const def = CROPS[cropId]
+  buySeed(cropId: GameCropId): boolean {
+    const def = getCrop(cropId)
     if (!cropUnlocked(def, this.ownedUpgrades, this.discoveredHybrids)) return false
     if (this.coins < def.seedBuyPrice) return false
     this.coins -= def.seedBuyPrice
@@ -42,7 +42,7 @@ export class Shop {
     return true
   }
 
-  buySeedBulk(cropId: CropId, amount: number): number {
+  buySeedBulk(cropId: GameCropId, amount: number): number {
     let bought = 0
     for (let i = 0; i < amount; i++) {
       if (!this.buySeed(cropId)) break

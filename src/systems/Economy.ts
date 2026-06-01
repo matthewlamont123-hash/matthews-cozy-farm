@@ -1,4 +1,4 @@
-import { CROP_LIST, CROPS, cropUnlocked, type CropId } from '../data/crops'
+import { CROP_LIST, cropUnlocked, getCrop, type CropId, type GameCropId } from '../data/crops'
 
 export interface ComboState {
   count: number
@@ -65,10 +65,10 @@ export function nextStreak(lastClaimDay: number, currentStreak: number, now = Da
 
 /** Small chance for bonus harvest value or free seed on manual harvest. */
 export function rollRareBonus(
-  cropId: CropId,
+  cropId: GameCropId,
   ownedUpgrades: Set<string>,
 ): { type: 'coins'; amount: number } | { type: 'seed'; cropId: CropId } | null {
-  const def = CROPS[cropId]
+  const def = getCrop(cropId)
   let chance = 0.012
   if (def.rarity === 'rare') chance = 0.025
   if (def.rarity === 'gold') chance = 0.035
@@ -83,10 +83,10 @@ export function rollRareBonus(
 
   const unlocked = CROP_LIST.filter((c) => cropUnlocked(c, ownedUpgrades))
   const pick = unlocked[Math.floor(Math.random() * unlocked.length)]
-  return pick ? { type: 'seed', cropId: pick.id } : null
+  return pick ? { type: 'seed', cropId: pick.id as CropId } : null
 }
 
-export function goldenWindfallChance(cropId: CropId): number {
+export function goldenWindfallChance(cropId: GameCropId): number {
   if (cropId === 'goldenApple') return 0.06
   if (cropId === 'watermelon' || cropId === 'pumpkin' || cropId === 'blueberry') return 0.035
   if (cropId === 'tomato' || cropId === 'lavender') return 0.018

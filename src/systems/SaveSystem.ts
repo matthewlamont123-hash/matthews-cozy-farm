@@ -1,21 +1,24 @@
-import type { CropId } from '../data/crops'
-import type { GameSave, GameSaveV1, GameSaveV2, GameSaveV3, ToolMode } from '../game/types'
+import type { ToolMode } from '../game/types'
+import type { GameSave, GameSaveV1, GameSaveV2, GameSaveV3, GameSaveV4 } from '../game/types'
+import type { FieldId } from '../data/fields'
+import type { TractorId } from '../data/tractors'
 import type { WeatherKind } from './Weather'
 import { DEFAULT_AUTOMATION } from './Automation'
 import type { AchievementStats } from './Achievements'
-import type { Farm } from './Farm'
+import type { FieldManager } from './FieldManager'
 import type { Inventory } from './Inventory'
+import type { DiscoveryJournal } from './DiscoveryJournal'
 
-const KEY = 'cozy-farm-sim-save-v3'
-const KEY_V2 = 'cozy-farm-sim-save-v2'
+const KEY = 'cozy-farm-sim-save-v4'
+const KEY_V3 = 'cozy-farm-sim-save-v3'
 
 export function saveGame(state: {
   coins: number
-  farm: Farm
+  fieldManager: FieldManager
   inventory: Inventory
   upgrades: Set<string>
   decors: Set<string>
-  selectedCrop: CropId
+  selectedCrop: string
   tool: ToolMode
   automation: typeof DEFAULT_AUTOMATION
   dailyStreak: number
@@ -28,20 +31,21 @@ export function saveGame(state: {
   activeQuestId: string | null
   questProgress: number
   completedQuestIds: string[]
-  discoveredHybrids: Set<CropId>
+  discoveredCrops: Set<string>
   gameDay: number
   useRealSeason: boolean
   weather: WeatherKind
+  ownedTractors: Set<TractorId>
+  journal: DiscoveryJournal
+  activeEvent: string | null
+  eventTimer: number
 }): void {
-  const payload: GameSaveV3 = {
-    v: 3,
+  const payload: GameSaveV4 = {
+    v: 4,
     coins: state.coins,
-    gridW: state.farm.w,
-    gridH: state.farm.h,
-    tiles: state.farm.serializeTiles(),
-    seeds: Object.fromEntries(state.inventory.seeds) as Partial<Record<CropId, number>>,
-    harvest: Object.fromEntries(state.inventory.harvest) as Partial<Record<CropId, number>>,
     capacity: state.inventory.capacity,
+    seeds: Object.fromEntries(state.inventory.seeds),
+    harvest: Object.fromEntries(state.inventory.harvest),
     upgrades: [...state.upgrades],
     decors: [...state.decors],
     selectedCrop: state.selectedCrop,
@@ -57,10 +61,18 @@ export function saveGame(state: {
     activeQuestId: state.activeQuestId,
     questProgress: state.questProgress,
     completedQuestIds: state.completedQuestIds,
-    discoveredHybrids: [...state.discoveredHybrids],
+    discoveredCrops: [...state.discoveredCrops],
     gameDay: state.gameDay,
     useRealSeason: state.useRealSeason,
     weather: state.weather,
+    activeField: state.fieldManager.activeId,
+    unlockedFields: [...state.fieldManager.unlocked],
+    fieldData: state.fieldManager.serializeFields() as GameSaveV4['fieldData'],
+    starterExpansions: state.fieldManager.starterExpansions,
+    ownedTractors: [...state.ownedTractors],
+    journal: state.journal.toJSON(),
+    activeEvent: state.activeEvent,
+    eventTimer: state.eventTimer,
   }
   try {
     localStorage.setItem(KEY, JSON.stringify(payload))
@@ -69,8 +81,66 @@ export function saveGame(state: {
   }
 }
 
-function migrateV2(data: GameSaveV2): GameSaveV3 {
+function migrateV3(data: GameSaveV3): GameSaveV4 {
+  const discovered: string[] = [...(data.discoveredHybrids ?? [])]
+  for (const id of [...discovered]) {
+    if (id === 'rainbowCarrot') discovered.push('disc_rainbow_carrot')
+    if (id === 'moonCorn') discovered.push('disc_moon_corn')
+    if (id === 'sparkPlum') discovered.push('disc_spark_plum')
+    if (id === 'candyMelon') discovered.push('disc_candy_melon')
+  }
+  const uniqueDisc = [...new Set(discovered.map((id) => (id.startsWith('disc_') ? id : `legacy_${id}`)))]
+  const expansions = Math.max(0, data.gridW - 3)
   return {
+    v: 4,
+    coins: data.coins,
+    capacity: data.capacity,
+    seeds: data.seeds as Record<string, number>,
+    harvest: data.harvest as Record<string, number>,
+    upgrades: data.upgrades,
+    decors: data.decors,
+    selectedCrop: data.selectedCrop,
+    tool: data.tool,
+    automation: data.automation,
+    dailyStreak: data.dailyStreak,
+    lastDailyClaim: data.lastDailyClaim,
+    comboCount: data.comboCount,
+    comboTimer: data.comboTimer,
+    prestigeLevel: data.prestigeLevel,
+    stats: data.stats,
+    unlockedAchievements: data.unlockedAchievements,
+    activeQuestId: data.activeQuestId,
+    questProgress: data.questProgress,
+    completedQuestIds: data.completedQuestIds,
+    discoveredCrops: uniqueDisc.filter((id) => id.startsWith('disc_')),
+    gameDay: data.gameDay,
+    useRealSeason: data.useRealSeason,
+    weather: data.weather,
+    activeField: 'starter',
+    unlockedFields: ['starter'],
+    fieldData: {
+      starter: {
+        w: data.gridW,
+        h: data.gridH,
+        tiles: data.tiles,
+        equipment: { irrigation: 0, fertilizer: 0, tractorId: null },
+      },
+    },
+    starterExpansions: expansions,
+    ownedTractors: data.upgrades.includes('tractor_1') ? ['rowRunner'] : ['rusty'],
+    journal: {
+      crops: Object.fromEntries(uniqueDisc.filter((id) => id.startsWith('disc_')).map((id) => [id, Date.now()])),
+      mutations: [],
+      tractors: data.upgrades.includes('tractor_1') ? ['rowRunner'] : ['rusty'],
+      fields: ['starter'],
+    },
+    activeEvent: null,
+    eventTimer: 0,
+  }
+}
+
+function migrateV2(data: GameSaveV2): GameSaveV4 {
+  return migrateV3({
     v: 3,
     coins: data.coins,
     gridW: data.gridW,
@@ -107,10 +177,10 @@ function migrateV2(data: GameSaveV2): GameSaveV3 {
     gameDay: 0,
     useRealSeason: true,
     weather: 'sunny',
-  }
+  })
 }
 
-function migrateV1(data: GameSaveV1): GameSaveV3 {
+function migrateV1(data: GameSaveV1): GameSaveV4 {
   return migrateV2({
     v: 2,
     coins: data.coins,
@@ -133,14 +203,15 @@ function migrateV1(data: GameSaveV1): GameSaveV3 {
   })
 }
 
-export function loadGame(): GameSaveV3 | null {
+export function loadGame(): GameSaveV4 | null {
   try {
-    const keys = [KEY, KEY_V2, 'cozy-farm-sim-save-v1']
+    const keys = [KEY, KEY_V3, 'cozy-farm-sim-save-v2', 'cozy-farm-sim-save-v1']
     for (const k of keys) {
       const raw = localStorage.getItem(k)
       if (!raw) continue
       const data = JSON.parse(raw) as GameSave
-      if (data.v === 3) return data as GameSaveV3
+      if (data.v === 4) return data as GameSaveV4
+      if (data.v === 3) return migrateV3(data as GameSaveV3)
       if (data.v === 2) return migrateV2(data as GameSaveV2)
       if (data.v === 1) return migrateV1(data as GameSaveV1)
     }
@@ -152,11 +223,16 @@ export function loadGame(): GameSaveV3 | null {
 
 export function clearSave(): void {
   localStorage.removeItem(KEY)
-  localStorage.removeItem(KEY_V2)
+  localStorage.removeItem(KEY_V3)
+  localStorage.removeItem('cozy-farm-sim-save-v2')
   localStorage.removeItem('cozy-farm-sim-save-v1')
 }
 
-export function applyLoadedFarm(farm: Farm, save: GameSaveV3): void {
-  farm.resize(save.gridW, save.gridH)
-  farm.loadTiles(save.tiles)
+export function applyLoadedFields(fm: FieldManager, save: GameSaveV4): void {
+  fm.hydrate(
+    save.unlockedFields as FieldId[],
+    save.activeField as FieldId,
+    save.fieldData as Parameters<FieldManager['hydrate']>[2],
+    save.starterExpansions,
+  )
 }

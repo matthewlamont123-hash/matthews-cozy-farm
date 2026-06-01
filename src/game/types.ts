@@ -1,10 +1,10 @@
-import type { CropId } from '../data/crops'
+import type { CropId, GameCropId } from '../data/crops'
 
 export type ToolMode = 'hoe' | 'water' | 'plant' | 'harvest'
 
 export interface TileState {
   kind: 'grass' | 'soil' | 'crop'
-  cropId?: CropId
+  cropId?: GameCropId
   /** 0..1 growth progress */
   growth: number
   /** Boosts growth speed until harvest */
@@ -17,14 +17,17 @@ export interface TileState {
   harvestsLeft?: number
   /** Brief flash when automation touches tile 0..1 */
   autoFlash?: number
+  /** Crop mutation variant */
+  mutation?: 'golden' | 'giant' | 'crystal' | 'rainbow'
 }
 
 export interface SerialTile {
   k: 'g' | 's' | 'c'
-  c?: CropId
+  c?: string
   g?: number
   w?: boolean
   h?: number
+  m?: 'golden' | 'giant' | 'crystal' | 'rainbow'
 }
 
 export type AutomationKind = 'till' | 'plant' | 'water' | 'harvest' | 'sell'
@@ -111,4 +114,43 @@ export interface GameSaveV3 {
   weather: 'sunny' | 'rainy' | 'cloudy'
 }
 
-export type GameSave = GameSaveV1 | GameSaveV2 | GameSaveV3
+export interface GameSaveV4 {
+  v: 4
+  coins: number
+  capacity: number
+  seeds: Partial<Record<string, number>>
+  harvest: Partial<Record<string, number>>
+  upgrades: string[]
+  decors: string[]
+  selectedCrop: string
+  tool: ToolMode
+  automation: AutomationLevels
+  dailyStreak: number
+  lastDailyClaim: number
+  comboCount: number
+  comboTimer: number
+  prestigeLevel: number
+  stats: GameSaveV3['stats']
+  unlockedAchievements: string[]
+  activeQuestId: string | null
+  questProgress: number
+  completedQuestIds: string[]
+  discoveredCrops: string[]
+  gameDay: number
+  useRealSeason: boolean
+  weather: 'sunny' | 'rainy' | 'cloudy'
+  activeField: string
+  unlockedFields: string[]
+  fieldData: Record<string, { w: number; h: number; tiles: SerialTile[][]; equipment: { irrigation: number; fertilizer: number; tractorId: string | null } }>
+  starterExpansions: number
+  ownedTractors: string[]
+  journal: { crops: Record<string, number>; mutations: string[]; tractors: string[]; fields: string[] }
+  activeEvent: string | null
+  eventTimer: number
+  /** Legacy v3 grid kept for migration reference */
+  gridW?: number
+  gridH?: number
+  tiles?: SerialTile[][]
+}
+
+export type GameSave = GameSaveV1 | GameSaveV2 | GameSaveV3 | GameSaveV4

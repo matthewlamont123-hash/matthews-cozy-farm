@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Toy Soil — Cozy Farm</title>
+    <title>Toy Soil 2.0 — Farm Discovery Empire</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -18,7 +18,8 @@
         <div class="brand">
           <span class="brand-mark">🌱</span>
           <div>
-            <strong>Toy Soil</strong>
+            <strong>Toy Soil 2.0</strong>
+            <div class="muted tiny brand-sub">Farm Discovery Empire</div>
           </div>
         </div>
         <div class="economy">
@@ -38,15 +39,21 @@
           <button type="button" class="pill ghost" id="btn-reset">↺ Reset</button>
           <span class="pill badge" id="season-badge" title="Active season">🌸 Spring</span>
           <span class="pill badge" id="weather-badge" title="Current weather">☀️ Sunny</span>
+          <span class="pill badge field-badge" id="field-badge" title="Active field">🌱 Starter Field</span>
           <span class="pill badge prestige hidden" id="prestige-badge" title="Prestige level">⭐ 0</span>
+          <span class="pill badge event-banner hidden" id="event-banner" aria-live="polite"></span>
         </div>
       </header>
+
+      <nav id="field-strip" class="field-bar" aria-label="Your farm fields"></nav>
 
       <main class="stage card-layer">
         <canvas id="game" tabindex="0" aria-label="Farm grid"></canvas>
         <div id="automation-bar" class="automation-bar card-layer" aria-live="polite">
           <span class="auto-label">Helpers:</span>
           <span id="automation-status">None yet</span>
+          <span class="auto-divider">·</span>
+          <span id="tractor-status" class="tractor-status">🚜 No tractor</span>
         </div>
         <div id="combo-badge" class="combo-badge hidden" aria-live="polite"></div>
         <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -80,6 +87,10 @@
           <button type="button" class="toy-btn wide ghost" id="btn-inventory">
             <span class="icon-circle">🧺</span>
             <span>Satchel</span>
+          </button>
+          <button type="button" class="toy-btn wide" id="btn-empire">
+            <span class="icon-circle">🏰</span>
+            <span>Empire</span>
           </button>
           <button type="button" class="toy-btn wide ghost" id="btn-journal">
             <span class="icon-circle">📔</span>
@@ -137,15 +148,36 @@
       </div>
       <nav class="journal-tabs" aria-label="Journal sections">
         <button type="button" class="tab active" data-tab="quests">Quests</button>
+        <button type="button" class="tab" data-tab="discover">Discover</button>
         <button type="button" class="tab" data-tab="breed">Breed</button>
         <button type="button" class="tab" data-tab="achieve">Badges</button>
         <button type="button" class="tab" data-tab="prestige">Prestige</button>
       </nav>
       <div id="journal-quests" class="journal-section"></div>
+      <div id="journal-discover" class="journal-section hidden"></div>
       <div id="journal-breed" class="journal-section hidden"></div>
       <div id="journal-achieve" class="journal-section hidden"></div>
       <div id="journal-prestige" class="journal-section hidden"></div>
     </aside>
+
+    <aside id="panel-empire" class="panel card-layer wide hidden" aria-hidden="true">
+      <div class="panel-head">
+        <h2>Farm empire</h2>
+        <button type="button" class="btn-close" data-close="empire">&times;</button>
+      </div>
+      <div id="empire-stats" class="empire-stats muted small"></div>
+      <div id="empire-fields" class="empire-grid"></div>
+      <h3 class="empire-subhead">Tractors</h3>
+      <div id="empire-tractors" class="empire-grid"></div>
+    </aside>
+
+    <div id="celebration" class="celebration hidden" aria-live="polite">
+      <div class="celebration-inner card-layer">
+        <div class="celebration-emoji" id="celebration-emoji">✨</div>
+        <strong id="celebration-title">Discovered!</strong>
+        <p id="celebration-name" class="muted"></p>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

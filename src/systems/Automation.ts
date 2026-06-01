@@ -1,4 +1,4 @@
-import type { CropId } from '../data/crops'
+import type { CropId, GameCropId } from '../data/crops'
 import type { AutomationKind, AutomationLevels } from '../game/types'
 import type { Farm } from './Farm'
 import type { Inventory } from './Inventory'
@@ -16,18 +16,18 @@ const AUTO_CONFIG: Record<
   AutomationKind,
   { interval: number[]; actions: number[]; sellThreshold: number[] }
 > = {
-  till: { interval: [0, 8, 5, 4], actions: [0, 1, 1, 2], sellThreshold: [1, 1, 1, 1] },
-  plant: { interval: [0, 10, 6, 5], actions: [0, 1, 2, 3], sellThreshold: [1, 1, 1, 1] },
-  water: { interval: [0, 7, 5, 4], actions: [0, 1, 2, 4], sellThreshold: [1, 1, 1, 1] },
-  harvest: { interval: [0, 9, 6, 5], actions: [0, 1, 2, 4], sellThreshold: [1, 1, 1, 1] },
-  sell: { interval: [0, 15, 10, 7], actions: [0, 1, 1, 1], sellThreshold: [1, 0.8, 0.6, 0.4] },
+  till: { interval: [0, 6, 4, 3], actions: [0, 1, 2, 3], sellThreshold: [1, 1, 1, 1] },
+  plant: { interval: [0, 7, 5, 4], actions: [0, 1, 2, 4], sellThreshold: [1, 1, 1, 1] },
+  water: { interval: [0, 5, 4, 3], actions: [0, 1, 3, 5], sellThreshold: [1, 1, 1, 1] },
+  harvest: { interval: [0, 6, 4, 3], actions: [0, 1, 3, 5], sellThreshold: [1, 1, 1, 1] },
+  sell: { interval: [0, 11, 8, 5], actions: [0, 1, 1, 1], sellThreshold: [1, 0.8, 0.6, 0.4] },
 }
 
 export interface AutomationAction {
   kind: AutomationKind
   gx?: number
   gy?: number
-  cropId?: CropId
+  cropId?: GameCropId
   sold?: number
 }
 
